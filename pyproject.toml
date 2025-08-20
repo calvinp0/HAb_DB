@@ -1,0 +1,2 @@
+[tool.alembic]
+# optional: nothing required if PYTHONPATH is set to project root
