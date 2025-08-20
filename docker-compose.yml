@@ -6,3 +6,17 @@ services:
       POSTGRES_USER: chem
       POSTGRES_PASSWORD: chem
     ports: ["5432:5432"]
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin_servers/servers.json:/pgadmin4/servers.json
+
+volumes:
+  pgadmin_data:

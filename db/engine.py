@@ -63,7 +63,7 @@ def get_engine(echo: bool = False) -> Engine:
         # Apply optional Postgres settings for each new connection
         with dbapi_conn.cursor() as cur:
             if STATEMENT_TIMEOUT_MS is not None:
-                cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}ms")
+                cur.execute(f"SET statement_timeout = {STATEMENT_TIMEOUT_MS}")
             if SEARCH_PATH:
                 cur.execute(f"SET search_path TO {SEARCH_PATH}")
 

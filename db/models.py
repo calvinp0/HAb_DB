@@ -38,7 +38,9 @@ class IngestBatch(TimeStampMixin, Base):
     source_label: Mapped[str] = mapped_column(String, nullable=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    reactions: Mapped[List[Reaction]] = relationship("reactions", back_populates="batch")
+    reactions: Mapped[List[Reaction]] = relationship(
+        lambda: Reaction, back_populates="batch"
+    )
 
 
 class Reaction(TimeStampMixin, Base):
@@ -53,10 +55,14 @@ class Reaction(TimeStampMixin, Base):
     meta_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     batch: Mapped[Optional[IngestBatch]] = relationship(
-        "IngestBatch", back_populates="reactions"
+        lambda: IngestBatch, back_populates="reactions"
     )
-    molecules: Mapped[List[Molecule]] = relationship(back_populates="reactions", cascade="all, delete-orphan")  # type: ignore[name-defined]
-    kinetics_sets: Mapped[List[KineticsSet]] = relationship(back_populates="reactions", cascade="all, delete-orphan")  # type: ignore[name-defined]
+    molecules: Mapped[List[Molecule]] = relationship(
+        lambda: Molecule, back_populates="reaction", cascade="all, delete-orphan"
+    )
+    kinetics_sets: Mapped[List[KineticsSet]] = relationship(
+        lambda: KineticsSet, back_populates="reaction", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         return f"<Reaction(reaction_id={self.reaction_id}, reaction_name={self.reaction_name}, family={self.family})>"
@@ -80,17 +86,29 @@ class Molecule(TimeStampMixin, Base):
     props: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     source_file: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     record_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    geometry_hash: Mapped[Optional[str]] = mapped_column(String, index=True)
 
     __table_args__ = (
-        UniqueConstraint("reaction_id", "role", name="uq_molecule_reaction_role"),
+        UniqueConstraint(
+            "reaction_id", "role", "geometry_hash", name="uq_mol_rxn_role_geom"
+        ),
         Index("ix_molecule_role", "role"),
         Index("ix_molecule_mw", "mw"),
         Index("idx_molecule_charge", "charge"),
         Index("idx_molecule_spinmult", "spin_mult"),
     )
-    reaction: Mapped[Reaction] = relationship("reactions", back_populates="molecules")
-    atoms: Mapped[List[Atom]] = relationship(back_populates="molecule", cascade="all, delete-orphan")  # type: ignore[name-defined]
-    ts_features: Mapped[Optional[TSFeatures]] = relationship(back_populates="molecule", uselist=False, cascade="all, delete-orphan")  # type: ignore[name-defined]
+    reaction: Mapped[Reaction] = relationship(
+        lambda: Reaction, back_populates="molecules"
+    )
+    atoms: Mapped[List[Atom]] = relationship(
+        lambda: Atom, back_populates="molecule", cascade="all, delete-orphan"
+    )
+    ts_features: Mapped[Optional[TSFeatures]] = relationship(
+        lambda: TSFeatures,
+        back_populates="molecule",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class Atom(Base):
@@ -104,6 +122,12 @@ class Atom(Base):
     atomic_num: Mapped[int] = mapped_column(Integer, nullable=False)
     formal_charge: Mapped[Optional[int]] = mapped_column(Integer)
     is_aromatic: Mapped[Optional[bool]] = mapped_column(Boolean)
+    q_mull: Mapped[Optional[float]] = mapped_column(Float)  # Mulliken charge
+    q_apt: Mapped[Optional[float]] = mapped_column(Float)  # APT charge
+    spin: Mapped[Optional[int]] = mapped_column(Integer)  # Spin multiplicity
+    Z: Mapped[Optional[int]] = mapped_column(Integer)  # Atomic number
+    mass: Mapped[Optional[float]] = mapped_column(Float)  # Atomic mass
+    f_mag: Mapped[Optional[float]] = mapped_column(Float)  # Magnetic moment
     xyz: Mapped[Optional[List[float]]] = mapped_column(
         JSON
     )  # store as JSON [x,y,z] if used
@@ -113,8 +137,10 @@ class Atom(Base):
         Index("idx_atom_molecule", "molecule_id"),
     )
 
-    molecule: Mapped[Molecule] = relationship(back_populates="atoms")  # type: ignore[name-defined]
-    roles: Mapped[List[AtomRoleMap]] = relationship(back_populates="atom", cascade="all, delete-orphan")  # type: ignore[name-defined]
+    molecule: Mapped[Molecule] = relationship(lambda: Molecule, back_populates="atoms")
+    roles: Mapped[List[AtomRoleMap]] = relationship(
+        lambda: AtomRoleMap, back_populates="atom", cascade="all, delete-orphan"
+    )
 
 
 class AtomRoleMap(Base):
@@ -125,7 +151,7 @@ class AtomRoleMap(Base):
     )
     role: Mapped[str] = mapped_column(AtomRole, primary_key=True)
 
-    atom: Mapped[Atom] = relationship(back_populates="roles")  # type: ignore[name-defined]
+    atom: Mapped[Atom] = relationship(lambda: Atom, back_populates="roles")
 
 
 class AtomMapToTS(Base):
@@ -249,7 +275,9 @@ class TSFeatures(Base):
     E_R2H: Mapped[Optional[float]] = mapped_column(Float)
     delta_E_dagger: Mapped[Optional[float]] = mapped_column(Float)
 
-    molecule: Mapped[Molecule] = relationship(back_populates="ts_features")  # type: ignore[name-defined]
+    molecule: Mapped[Molecule] = relationship(
+        lambda: Molecule, back_populates="ts_features"
+    )
 
 
 class KineticsSet(TimeStampMixin, Base):
@@ -293,4 +321,6 @@ class KineticsSet(TimeStampMixin, Base):
         Index("idx_kset_T", "Tmin_K", "Tmax_K"),
     )
 
-    reaction: Mapped[Reaction] = relationship(back_populates="kinetics_sets")  # type: ignore[name-defined]
+    reaction: Mapped[Reaction] = relationship(
+        lambda: Reaction, back_populates="kinetics_sets"
+    )
