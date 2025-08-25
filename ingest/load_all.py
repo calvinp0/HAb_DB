@@ -13,14 +13,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from db.engine import session_scope, exec_sql
 from db.models import (
     IngestBatch,
+    ReactionParticipant,
     Reaction,
-    Molecule,
-    Atom,
+    Species,
+    Conformer,
+    ConformerAtom,
     AtomRoleMap,
     GeomDistance,
     GeomAngle,
     GeomDihedral,
-    KineticsSet,
+    RateModel,
     LevelOfTheory,
     TSFeatures,
 )
@@ -65,17 +67,22 @@ def _parse_path(s: Optional[str]) -> Optional[Sequence[int]]:
 
 
 def _parse_bool(v) -> Optional[bool]:
-    if v is None: return None
+    if v is None:
+        return None
     s = str(v).strip().lower()
-    if s in {"1","true","t","yes","y"}: return True
-    if s in {"0","false","f","no","n"}: return False
+    if s in {"1", "true", "t", "yes", "y"}:
+        return True
+    if s in {"0", "false", "f", "no", "n"}:
+        return False
     return None
+
 
 def _parse_float_or_none(v) -> Optional[float]:
     try:
         return float(v) if v is not None and str(v).strip() != "" else None
     except Exception:
         return None
+
 
 def _extract_ts_fields(props: dict) -> dict:
     def first(*keys):
@@ -84,21 +91,24 @@ def _extract_ts_fields(props: dict) -> dict:
                 return props[k]
         return None
 
-    imag = first("imag_freq_cm1", "nu_imag_cm1", "v_imag_cm1", "imaginary_frequency_cm1")
-    irc  = first("irc_verified", "irc_ok", "irc")
+    imag = first(
+        "imag_freq_cm1", "nu_imag_cm1", "v_imag_cm1", "imaginary_frequency_cm1"
+    )
+    irc = first("irc_verified", "irc_ok", "irc")
     e_ts = first("E_TS", "E_ts", "E(TS)", "E_ts_hartree", "E_TS_kJ_mol")
     e_r1 = first("E_R1H", "E_r1h", "E(R1H)")
     e_r2 = first("E_R2H", "E_r2h", "E(R2H)")
-    de   = first("delta_E_dagger", "dE_dagger", "Ea", "Ea_kJ_mol")
+    de = first("delta_E_dagger", "dE_dagger", "Ea", "Ea_kJ_mol")
 
     return {
         "imag_freq_cm1": _parse_float_or_none(imag),
-        "irc_verified":  _parse_bool(irc),
-        "E_TS":          _parse_float_or_none(e_ts),
-        "E_R1H":         _parse_float_or_none(e_r1),
-        "E_R2H":         _parse_float_or_none(e_r2),
-        "delta_E_dagger":_parse_float_or_none(de),
+        "irc_verified": _parse_bool(irc),
+        "E_TS": _parse_float_or_none(e_ts),
+        "E_R1H": _parse_float_or_none(e_r1),
+        "E_R2H": _parse_float_or_none(e_r2),
+        "delta_E_dagger": _parse_float_or_none(de),
     }
+
 
 def _index_csv(csv_path: Path) -> Dict[str, Dict[str, Dict[int, dict]]]:
     """Index CSV by reaction → role (R1H/R2H/TS) → focus_atom_idx → row dict."""
@@ -272,6 +282,31 @@ def _merge_kinetics(session: Session, reaction_id: int, row: dict):
     return ks
 
 
+# unit helpers (prefer per-row units; fallback to CLI flag for legacy files)
+def _angle_deg(val: Optional[float], units: Optional[str], csv_angles_are_deg: bool) -> Optional[float]:
+    if val is None:
+        return None
+    u = (units or "").strip().lower()
+    if u in {"deg", "degree", "degrees"}:
+        return val
+    if u in {"rad", "radian", "radians"}:
+        return val * 180.0 / math.pi
+    # fallback to flag if units missing
+    return val if csv_angles_are_deg else (val * 180.0 / math.pi)
+
+def _radius_ang(val: Optional[float], units: Optional[str]) -> Optional[float]:
+    if val is None:
+        return None
+    u = (units or "").strip().lower()
+    if u in {"a", "ang", "angstrom", "ångström", "angstroms"}:
+        return val
+    if u in {"nm"}:
+        return val * 10.0
+    if u in {"pm"}:
+        return val * 0.01
+    # assume Å if missing
+    return val
+
 # -------------------------- role labels --------------------------
 
 
@@ -302,96 +337,90 @@ def _ensure_rdkit():
         pass
 
 
-def enrich_molecule(mol, mol_record, reaction):
-    """Create a Molecule ORM row with RDKit-enriched props."""
-    return Molecule(
-        reaction=reaction,
-        role=mol_record.role,
-        mol=Chem.MolToSmiles(mol),
-        smiles=Chem.MolToSmiles(mol),
-        inchikey=Chem.MolToInchiKey(mol),
-        charge=Chem.GetFormalCharge(mol),
-        spin_mult=Chem.Descriptors.NumRadicalElectrons(mol) + 1,
-        mw=Descriptors.MolWt(mol),
-        props=mol_record.props,
-        source_file=mol_record.reaction_name,
-        record_index=mol_record.record_index,
+# -------------------------- Upsert ------------------------------
+
+
+def upsert_species(
+    session,
+    smiles: str | None,
+    inchikey: str | None,
+    charge: int | None,
+    spin_mult: int | None,
+    mw: float | None,
+    props: dict | None,
+):
+    # choose a stable identity key; inchikey if present, else (smiles, charge, spin_mult)
+    q = (
+        select(Species).where(Species.inchikey == inchikey)
+        if inchikey
+        else select(Species).where(
+            Species.smiles == smiles,
+            Species.charge == charge,
+            Species.spin_multiplicity == spin_mult,
+        )
+    )
+    sp = session.scalar(q)
+    if sp:
+        # best-effort enrich
+        for k, v in dict(smiles=smiles, mw=mw, props=props).items():
+            if v is not None:
+                setattr(sp, k, v)
+        return sp.species_id
+
+    sp = Species(
+        smiles=smiles,
+        inchikey=inchikey,
+        charge=charge,
+        spin_multiplicity=spin_mult,
+        mw=mw,
+        props=props,
+    )
+    session.add(sp)
+    session.flush()
+    return sp.species_id
+
+
+
+def upsert_conformer(session, species_id: int, lot_id: int,
+                     mol_rdkit_smiles: str, geometry_hash: str,
+                     well_label: str|None, is_ts: bool):
+    tbl = Conformer.__table__
+    ins = (
+        pg_insert(tbl)
+        .values(
+            species_id=species_id,
+            lot_id=lot_id,
+            geometry_hash=geometry_hash,
+            well_label=well_label,
+            is_ts=is_ts,
+            mol=func.mol_from_smiles(mol_rdkit_smiles),
+        )
     )
 
-
-# -------------------------- Upsert ------------------------------
-def upsert_molecule(
-    session,
-    reaction_id: int,
-    role: str,
-    smiles: str,
-    inchikey: str,
-    charge: int,
-    spin_mult: int,
-    mw: float,
-    props: dict,
-    source_file: str | None,
-    record_index: int | None,
-    ghash: str | None,
-    lot_id: int | None = None,
-):
-    """
-    UPSERT into molecule on (reaction_id, role) and return molecule_id.
-    Assumes Molecule.mol is RDKit 'mol' type; create from SMILES.
-    """
-    tbl = Molecule.__table__
     stmt = (
-        pg_insert(Molecule.__table__)
-        .values(
-            reaction_id=reaction_id,
-            role=role,
-            record_index=record_index,
-            mol=func.mol_from_smiles(smiles),
-            smiles=smiles,
-            inchikey=inchikey,
-            charge=charge,
-            spin_mult=spin_mult,
-            mw=mw,
-            props=props,
-            source_file=source_file,
-            geometry_hash=ghash,
-            lot_id=lot_id
-        )
-        # conflict target must match the UNIQUE constraint:
-        .on_conflict_do_update(
-            index_elements=["reaction_id", "role", "geometry_hash"],
+        ins.on_conflict_do_update(
+            # must match a unique/PK constraint on the table:
+            index_elements=[tbl.c.species_id, tbl.c.lot_id, tbl.c.geometry_hash],
             set_={
-                "mol": func.mol_from_smiles(smiles),
-                "smiles": smiles,
-                "inchikey": inchikey,
-                "charge": charge,
-                "spin_mult": spin_mult,
-                "mw": mw,
-                "props": props,
-                "source_file": source_file,
-                "record_index": record_index,
+                # take the incoming values on conflict
+                "well_label": ins.excluded.well_label,
+                "is_ts": ins.excluded.is_ts,
+                # re-generate mol from the new SMILES
+                "mol": func.mol_from_smiles(mol_rdkit_smiles),
                 "updated_at": func.now(),
-                "geometry_hash": ghash,
-                "lot_id": lot_id
             },
         )
-        .returning(Molecule.__table__.c.molecule_id)
+        .returning(tbl.c.conformer_id)
     )
     return session.scalar(stmt)
 
 
-
-def upsert_ts_features(
-    session: Session,
-    molecule_id: int,
-    lot_id: int,
-    fields: dict,
-) -> None:
+def upsert_ts_features(session, conformer_id: int, lot_id: int, fields: dict):
     tbl = TSFeatures.__table__
     stmt = (
         pg_insert(tbl)
         .values(
-            molecule_id=molecule_id,
+            conformer_id=conformer_id,
             lot_id=lot_id,
             imag_freq_cm1=fields.get("imag_freq_cm1"),
             irc_verified=fields.get("irc_verified"),
@@ -401,7 +430,7 @@ def upsert_ts_features(
             delta_E_dagger=fields.get("delta_E_dagger"),
         )
         .on_conflict_do_update(
-            index_elements=[tbl.c.molecule_id],
+            index_elements=[tbl.c.conformer_id],
             set_={
                 "lot_id": tbl.bindparam("lot_id"),
                 "imag_freq_cm1": tbl.bindparam("imag_freq_cm1"),
@@ -410,24 +439,90 @@ def upsert_ts_features(
                 "E_R1H": tbl.bindparam("E_R1H"),
                 "E_R2H": tbl.bindparam("E_R2H"),
                 "delta_E_dagger": tbl.bindparam("delta_E_dagger"),
+                "updated_at": func.now(),
             },
         )
     )
     session.execute(stmt)
 
-def get_or_create_lot(session: Session, method: str, basis: str | None, solvent: str | None) -> int:
+
+def _merge_kinetics(session: Session, reaction_id: int, row: dict):
+    q = select(RateModel).where(
+        RateModel.reaction_id == reaction_id,
+        RateModel.direction == row["direction"],
+        RateModel.source == row.get("source"),
+        RateModel.reference == row.get("reference"),
+        RateModel.Tmin_K == row.get("Tmin_K"),
+        RateModel.Tmax_K == row.get("Tmax_K"),
+    )
+    existing = session.scalar(q)
+    if existing:
+        for k in (
+            "model",
+            "A",
+            "n",
+            "Ea_kJ_mol",
+            "computed_from",
+            "dA_factor",
+            "dn_abs",
+            "dEa_kJ_mol",
+            "meta",
+        ):
+            v = row.get(k)
+            if v is not None:
+                setattr(existing, k, v)
+        return existing
+
+    rm = RateModel(
+        reaction_id=reaction_id,
+        direction=row["direction"],
+        model=row.get("model") or "ModifiedArrhenius",
+        A=row["A"],
+        n=row.get("n"),
+        Ea_kJ_mol=row["Ea_kJ_mol"],
+        Tmin_K=row["Tmin_K"],
+        Tmax_K=row["Tmax_K"],
+        source=row.get("source"),
+        reference=row.get("reference"),
+        computed_from=row.get("computed_from"),
+        dA_factor=row.get("dA_factor"),
+        dn_abs=row.get("dn_abs"),
+        dEa_kJ_mol=row.get("dEa_kJ_mol"),
+        meta=row.get("meta"),
+    )
+    session.add(rm)
+    return rm
+
+
+def link_participant(session, reaction_id: int, conformer_id: int, role: str):
+    tbl = ReactionParticipant.__table__
+    stmt = (
+        pg_insert(tbl)
+        .values(reaction_id=reaction_id, conformer_id=conformer_id, role=role)
+        .on_conflict_do_nothing()
+    )
+    session.execute(stmt)
+
+
+def get_or_create_lot(
+    session, method: str, basis: str | None, solvent: str | None
+) -> int:
     lot_string = f"{method}/{basis or ''}".strip("/")
-    q = select(LevelOfTheory).where(LevelOfTheory.method==method,
-                                    LevelOfTheory.basis==basis,
-                                    LevelOfTheory.solvent==solvent)
+    q = select(LevelOfTheory).where(
+        LevelOfTheory.method == method,
+        LevelOfTheory.basis == basis,
+        LevelOfTheory.solvent == solvent,
+    )
     lot = session.scalar(q)
     if lot:
         return lot.lot_id
-
-    lot = LevelOfTheory(method=method, basis=basis, solvent=solvent, lot_string=lot_string)
+    lot = LevelOfTheory(
+        method=method, basis=basis, solvent=solvent, lot_string=lot_string
+    )
     session.add(lot)
     session.flush()
     return lot.lot_id
+
 
 # -------------------------- core load ----------------------------
 
@@ -524,30 +619,41 @@ def load_all(
                     lot_method, lot_basis, lot_solvent = "unknown", None, None
                 lot_id = get_or_create_lot(session, lot_method, lot_basis, lot_solvent)
                 if not dry_run:
-                    molecule_id = upsert_molecule(
+                    species_id = upsert_species(
                         session,
-                        reaction_id=reaction.reaction_id,
-                        role=rec.role,
                         smiles=smiles,
                         inchikey=inchikey,
                         charge=charge,
                         spin_mult=spin_mult,
                         mw=mw,
                         props=rec.props,
-                        source_file=rec.reaction_name,
-                        record_index=rec.record_index,
-                        ghash=ghash,
+                    )
+                    is_ts = rec.role.upper() == "TS"
+                    conformer_id = upsert_conformer(
+                        session,
+                        species_id=species_id,
                         lot_id=lot_id,
+                        mol_rdkit_smiles=smiles,
+                        geometry_hash=ghash,
+                        well_label=rec.props.get("well_label"),
+                        is_ts=is_ts,
+                    )
+                    link_participant(
+                        session,
+                        reaction_id=reaction.reaction_id,
+                        conformer_id=conformer_id,
+                        role=rec.role,
                     )
                     stats["molecules_upserted"] += 1
-                    if rec.role.lower() == "ts" and lot_id is not None:
-                        print("Upserting TS features for molecule_id", molecule_id, "lot_id", lot_id)
+                    if is_ts:
                         ts_fields = _extract_ts_fields(rec.props or {})
-                        # Only write if we have at least *something* to store
-                        print("TS fields extracted:", ts_fields)
                         if any(v is not None for v in ts_fields.values()):
-                            print("  with fields:", ts_fields)
-                            upsert_ts_features(session, molecule_id=molecule_id, lot_id=lot_id, fields=ts_fields)
+                            upsert_ts_features(
+                                session,
+                                conformer_id=conformer_id,
+                                lot_id=lot_id,
+                                fields=ts_fields,
+                            )
 
                 else:
                     molecule_id = -1  # simulate
@@ -559,8 +665,8 @@ def load_all(
                 for i, atom in enumerate(rmol.GetAtoms()):
                     if not dry_run:
                         p = conf.GetAtomPosition(i)
-                        a = Atom(
-                            molecule_id=molecule_id,
+                        a = ConformerAtom(
+                            conformer_id=conformer_id,
                             atom_idx=i,
                             atomic_num=atom.GetAtomicNum(),
                             formal_charge=atom.GetFormalCharge(),
@@ -611,7 +717,7 @@ def load_all(
                         if not row:
                             continue
                         # Update Atom numeric fields
-                        atom = session.get(Atom, atom_id)
+                        atom = session.get(ConformerAtom, atom_id)
                         atom.q_mull = _flt(row.get("q_mull"))
                         atom.q_apt = _flt(row.get("q_apt"))
                         atom.spin = _int(row.get("spin"))
@@ -620,77 +726,82 @@ def load_all(
                         atom.f_mag = _flt(row.get("f_mag"))
 
                         if mirror_geom_from_csv and not dry_run:
-                            path = _parse_path(row.get("path"))
+                            # paths are like "[3, 5]" / "[3, 0, 5]" / "[3, 0, 1, 5]"
+                            r_path = _parse_path(row.get("radius_path"))
+                            a_path = _parse_path(row.get("angle_path"))
+                            d_path = _parse_path(row.get("dihedral_path"))
+
                             radius = _flt(row.get("radius"))
                             angle_v = _flt(row.get("angle"))
                             dihed_v = _flt(row.get("dihedral"))
 
-                            def _deg(x: Optional[float]) -> Optional[float]:
-                                if x is None:
-                                    return None
-                                return (
-                                    x if csv_angles_are_deg else (x * 180.0 / math.pi)
-                                )
+                            angle_units = row.get("angle_units")
+                            dihed_units = row.get("dihedral_units")
+                            radius_units = row.get("radius_units")
 
-                            if path and len(path) == 2 and radius is not None:
-                                a1 = role_to_idx2id[role].get(path[0])
-                                a2 = role_to_idx2id[role].get(path[1])
+                            # distance
+                            if r_path and len(r_path) == 2 and radius is not None:
+                                a1 = role_to_idx2id[role].get(r_path[0])
+                                a2 = role_to_idx2id[role].get(r_path[1])
                                 if a1 and a2:
                                     session.add(
                                         GeomDistance(
-                                            molecule_id=session.get(
-                                                Atom, a1
-                                            ).molecule_id,  # same molecule
-                                            frame=frame,
+                                            conformer_id=session.get(ConformerAtom, a1).conformer_id,
+                                            frame=FRAME_MAP[role],
                                             a1_id=a1,
                                             a2_id=a2,
-                                            value_ang=radius,
+                                            value_ang=_radius_ang(radius, radius_units),
+                                            units=row.get('radius_units'),
                                             measure_name="csv_radius",
                                             feature_ver="csv_v1",
                                         )
                                     )
 
-                            if path and len(path) == 3 and angle_v is not None:
-                                a1 = role_to_idx2id[role].get(path[0])
-                                a2 = role_to_idx2id[role].get(path[1])
-                                a3 = role_to_idx2id[role].get(path[2])
+                            # angle
+                            if a_path and len(a_path) == 3 and angle_v is not None:
+                                a1 = role_to_idx2id[role].get(a_path[0])
+                                a2 = role_to_idx2id[role].get(a_path[1])
+                                a3 = role_to_idx2id[role].get(a_path[2])
                                 if a1 and a2 and a3:
                                     session.add(
                                         GeomAngle(
-                                            molecule_id=session.get(
-                                                Atom, a1
-                                            ).molecule_id,
-                                            frame=frame,
+                                            conformer_id=session.get(ConformerAtom, a1).conformer_id,
+                                            frame=FRAME_MAP[role],
                                             a1_id=a1,
                                             a2_id=a2,
                                             a3_id=a3,
-                                            value_deg=_deg(angle_v),
+                                            value_deg=_angle_deg(angle_v, angle_units, csv_angles_are_deg=csv_angles_are_deg),
+                                            units=row.get('angle_units'),
                                             measure_name="csv_angle",
                                             feature_ver="csv_v1",
                                         )
                                     )
 
-                            if path and len(path) == 4 and dihed_v is not None:
-                                a1 = role_to_idx2id[role].get(path[0])
-                                a2 = role_to_idx2id[role].get(path[1])
-                                a3 = role_to_idx2id[role].get(path[2])
-                                a4 = role_to_idx2id[role].get(path[3])
+                            # dihedral
+                            if d_path and len(d_path) == 4 and dihed_v is not None:
+                                a1 = role_to_idx2id[role].get(d_path[0])
+                                a2 = role_to_idx2id[role].get(d_path[1])
+                                a3 = role_to_idx2id[role].get(d_path[2])
+                                a4 = role_to_idx2id[role].get(d_path[3])
                                 if a1 and a2 and a3 and a4:
                                     session.add(
                                         GeomDihedral(
-                                            molecule_id=session.get(
-                                                Atom, a1
-                                            ).molecule_id,
-                                            frame=frame,
+                                            conformer_id=session.get(ConformerAtom, a1).conformer_id,
+                                            frame=FRAME_MAP[role],
                                             a1_id=a1,
                                             a2_id=a2,
                                             a3_id=a3,
                                             a4_id=a4,
-                                            value_deg=_deg(dihed_v),
+                                            value_deg=_angle_deg(dihed_v, dihed_units, csv_angles_are_deg=csv_angles_are_deg),
+                                            units = row.get('dihedral_units'),
                                             measure_name="csv_dihedral",
                                             feature_ver="csv_v1",
                                         )
                                     )
+
+                                    # Commit per reaction
+                                    if not dry_run:
+                                        session.commit()
 
             # Commit per reaction
             if not dry_run:

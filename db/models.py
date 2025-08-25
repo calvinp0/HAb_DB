@@ -45,251 +45,279 @@ class IngestBatch(TimeStampMixin, Base):
 
 class Reaction(TimeStampMixin, Base):
     __tablename__ = "reactions"
-
     reaction_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    batch_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("ingest_batch.batch_id"), nullable=True
-    )
+    batch_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ingest_batch.batch_id"))
     reaction_name: Mapped[Optional[str]] = mapped_column(String, unique=True)
-    family: Mapped[Optional[str]] = mapped_column(String, nullable=False)
-    meta_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    family: Mapped[str] = mapped_column(String, nullable=False)
+    meta_data: Mapped[Optional[dict]] = mapped_column(JSONB)
 
-    batch: Mapped[Optional[IngestBatch]] = relationship(
-        lambda: IngestBatch, back_populates="reactions"
+    batch: Mapped[Optional["IngestBatch"]] = relationship(back_populates="reactions")
+    participants: Mapped[List["ReactionParticipant"]] = relationship(
+        back_populates="reaction", cascade="all, delete-orphan"
     )
-    molecules: Mapped[List[Molecule]] = relationship(
-        lambda: Molecule, back_populates="reaction", cascade="all, delete-orphan"
-    )
-    kinetics_sets: Mapped[List[KineticsSet]] = relationship(
-        lambda: KineticsSet, back_populates="reaction", cascade="all, delete-orphan"
+    rate_models: Mapped[List["RateModel"]] = relationship(
+        back_populates="reaction", cascade="all, delete-orphan"
     )
 
     def __repr__(self):
         return f"<Reaction(reaction_id={self.reaction_id}, reaction_name={self.reaction_name}, family={self.family})>"
 
 
-class Molecule(TimeStampMixin, Base):
-    __tablename__ = "molecule"
+class Species(TimeStampMixin, Base):
+    __tablename__ = "species"
 
-    molecule_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    reaction_id: Mapped[int] = mapped_column(
-        ForeignKey("reactions.reaction_id", ondelete="CASCADE"), nullable=False
-    )
-    role: Mapped[str] = mapped_column(MolRole, nullable=False)
+    species_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
 
-    mol: Mapped[object] = mapped_column(Mol, nullable=False)
-    smiles: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    inchikey: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    charge: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    spin_mult: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    mw: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    props: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    source_file: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    record_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    geometry_hash: Mapped[Optional[str]] = mapped_column(String, index=True)
-    lot_id: Mapped[int] = mapped_column(
-        ForeignKey("level_of_theory.lot_id", ondelete="RESTRICT"), nullable=False, index=True
-    )
+    # Chemical Fields
+    smiles: Mapped[Optional[str]] = mapped_column(String)
+    inchikey: Mapped[Optional[str]] = mapped_column(String)
+    charge: Mapped[Optional[int]] = mapped_column(Integer)
+    spin_multiplicity: Mapped[Optional[int]] = mapped_column(Integer)
+    mw: Mapped[Optional[float]] = mapped_column(Float)
+    props: Mapped[Optional[dict]] = mapped_column(JSONB)
+
     __table_args__ = (
         UniqueConstraint(
-            "reaction_id", "role", "geometry_hash", name="uq_mol_rxn_role_geom"
+            "inchikey", "charge", "spin_multiplicity", name="uq_species_identity"
         ),
-        Index("ix_molecule_role", "role"),
-        Index("ix_molecule_mw", "mw"),
-        Index("idx_molecule_charge", "charge"),
-        Index("idx_molecule_spinmult", "spin_mult"),
-    )
-    reaction: Mapped[Reaction] = relationship(
-        lambda: Reaction, back_populates="molecules"
-    )
-    atoms: Mapped[List[Atom]] = relationship(
-        lambda: Atom, back_populates="molecule", cascade="all, delete-orphan"
+        Index("ix_species_inchikey", "inchikey"),
     )
 
-    lot: Mapped["LevelOfTheory"] = relationship(lambda: LevelOfTheory, backref="molecules")
+    conformers: Mapped[List["Conformer"]] = relationship(
+        back_populates="species", cascade="all, delete-orphan"
+    )
 
-    ts_features: Mapped[Optional[TSFeatures]] = relationship(
-        lambda: TSFeatures,
-        back_populates="molecule",
+    def __repr__(self):
+        return f"<Species(species_id={self.species_id}, inchi={self.inchi}, smiles={self.smiles})>"
+
+
+class Conformer(TimeStampMixin, Base):
+    __tablename__ = "conformer"
+    conformer_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    species_id: Mapped[int] = mapped_column(
+        ForeignKey("species.species_id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("level_of_theory.lot_id", ondelete="RESTRICT"),
+        index=True,
+        nullable=False,
+    )
+    geometry_hash: Mapped[str] = mapped_column(String, index=True)
+    well_label: Mapped[Optional[str]] = mapped_column(String)
+    is_ts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # store a canonical RDKit mol (rdkit type column)
+    mol: Mapped[object] = mapped_column(Mol, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "species_id", "geometry_hash", "lot_id", name="uq_conformer_geom"
+        ),
+        Index("ix_conformer_well", "well_label"),
+    )
+
+    species: Mapped["Species"] = relationship(back_populates="conformers")
+    geom_lot: Mapped["LevelOfTheory"] = relationship()
+
+    atoms: Mapped[List["ConformerAtom"]] = relationship(
+        back_populates="conformer", cascade="all, delete-orphan"
+    )
+    distances: Mapped[List["GeomDistance"]] = relationship(
+        back_populates="conformer", cascade="all, delete-orphan"
+    )
+    angles: Mapped[List["GeomAngle"]] = relationship(
+        back_populates="conformer", cascade="all, delete-orphan"
+    )
+    dihedrals: Mapped[List["GeomDihedral"]] = relationship(
+        back_populates="conformer", cascade="all, delete-orphan"
+    )
+
+    well_features: Mapped[Optional["WellFeatures"]] = relationship(
+        lambda: WellFeatures,
+        back_populates="conformer",
         uselist=False,
         cascade="all, delete-orphan",
     )
 
-
-class Atom(Base):
-    __tablename__ = "atom"
-
-    atom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    molecule_id: Mapped[int] = mapped_column(
-        ForeignKey("molecule.molecule_id", ondelete="CASCADE"), nullable=False
+    ts_features: Mapped[Optional["TSFeatures"]] = relationship(
+        lambda: TSFeatures,
+        back_populates="conformer",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
-    atom_idx: Mapped[int] = mapped_column(Integer, nullable=False)  # 0-based
+
+class WellFeatures(TimeStampMixin, Base):
+    __tablename__ = "well_features"
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
+    )
+    # Lot is already on Structure; no need to repeat unless you want redundancy
+    E_elec: Mapped[Optional[float]] = mapped_column(Float)
+    ZPE: Mapped[Optional[float]] = mapped_column(Float)
+    H298: Mapped[Optional[float]] = mapped_column(Float)
+    G298: Mapped[Optional[float]] = mapped_column(Float)
+    meta: Mapped[Optional[dict]] = mapped_column(JSONB)
+    conformer: Mapped[Conformer] = relationship(
+        lambda: Conformer, back_populates="well_features"
+    )
+
+
+class ConformerAtom(Base):
+    __tablename__ = "conformer_atom"
+    atom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    atom_idx: Mapped[int] = mapped_column(Integer, nullable=False)
     atomic_num: Mapped[int] = mapped_column(Integer, nullable=False)
     formal_charge: Mapped[Optional[int]] = mapped_column(Integer)
     is_aromatic: Mapped[Optional[bool]] = mapped_column(Boolean)
-    q_mull: Mapped[Optional[float]] = mapped_column(Float)  # Mulliken charge
-    q_apt: Mapped[Optional[float]] = mapped_column(Float)  # APT charge
-    spin: Mapped[Optional[int]] = mapped_column(Integer)  # Spin multiplicity
-    Z: Mapped[Optional[int]] = mapped_column(Integer)  # Atomic number
-    mass: Mapped[Optional[float]] = mapped_column(Float)  # Atomic mass
-    f_mag: Mapped[Optional[float]] = mapped_column(Float)  # Magnetic moment
-    xyz: Mapped[Optional[List[float]]] = mapped_column(
-        JSON
-    )  # store as JSON [x,y,z] if used
+    q_mull: Mapped[Optional[float]] = mapped_column(Float)
+    q_apt: Mapped[Optional[float]] = mapped_column(Float)
+    spin: Mapped[Optional[int]] = mapped_column(Integer)
+    Z: Mapped[Optional[int]] = mapped_column(Integer)
+    mass: Mapped[Optional[float]] = mapped_column(Float)
+    f_mag: Mapped[Optional[float]] = mapped_column(Float)
+    xyz: Mapped[Optional[List[float]]] = mapped_column(JSON)
 
     __table_args__ = (
-        UniqueConstraint("molecule_id", "atom_idx", name="uq_atom_mol_idx"),
-        Index("idx_atom_molecule", "molecule_id"),
+        UniqueConstraint("conformer_id", "atom_idx", name="uq_conf_atom_idx"),
     )
 
-    molecule: Mapped[Molecule] = relationship(lambda: Molecule, back_populates="atoms")
-    roles: Mapped[List[AtomRoleMap]] = relationship(
-        lambda: AtomRoleMap, back_populates="atom", cascade="all, delete-orphan"
+    conformer: Mapped["Conformer"] = relationship(back_populates="atoms")
+    roles: Mapped[List["AtomRoleMap"]] = relationship(
+        back_populates="atom", cascade="all, delete-orphan"
     )
 
 
 class AtomRoleMap(Base):
     __tablename__ = "atom_role_map"
-
     atom_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(AtomRole, primary_key=True)
-
-    atom: Mapped[Atom] = relationship(lambda: Atom, back_populates="roles")
+    atom: Mapped["ConformerAtom"] = relationship(back_populates="roles")
 
 
 class AtomMapToTS(Base):
     __tablename__ = "atom_map_to_ts"
-
-    reaction_id: Mapped[int] = mapped_column(
-        ForeignKey("reactions.reaction_id", ondelete="CASCADE"), primary_key=True
+    ts_conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
     )
-    from_role: Mapped[str] = mapped_column(MolRole, primary_key=True)
+    from_conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
+    )
     from_atom_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), primary_key=True
-    )  # noqa: E731
-    ts_atom_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), primary_key=True
     )
-
-    __table_args__ = (
-        CheckConstraint("from_role in ('R1H','R2H')", name="ck_atommap_fromrole"),
-        Index("idx_atommap_reaction_role", "reaction_id", "from_role"),
+    ts_atom_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
 
 
 class GeomDistance(Base):
     __tablename__ = "geom_distance"
-
     geom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    molecule_id: Mapped[int] = mapped_column(
-        ForeignKey("molecule.molecule_id", ondelete="CASCADE"), nullable=False
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     frame: Mapped[str] = mapped_column(FeatureFrame, nullable=False, default="none")
     a1_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     a2_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     value_ang: Mapped[float] = mapped_column(Float, nullable=False)
-    measure_name: Mapped[str] = mapped_column(
-        String, nullable=False
-    )  # e.g., 'r_DH','r_HA','r_DA'
+    measure_name: Mapped[str] = mapped_column(String, nullable=False)
+    units: Mapped[str] = mapped_column(String, nullable=False, default="ang")
     feature_ver: Mapped[Optional[str]] = mapped_column(String)
 
-    __table_args__ = (
-        Index("idx_gdist_measure_val", "measure_name", "value_ang"),
-        Index("idx_gdist_molecule", "molecule_id"),
-    )
+    __table_args__ = (Index("idx_gdist_measure_val", "measure_name", "value_ang"),)
+    conformer: Mapped["Conformer"] = relationship(back_populates="distances")
 
 
 class GeomAngle(Base):
     __tablename__ = "geom_angle"
-
     geom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    molecule_id: Mapped[int] = mapped_column(
-        ForeignKey("molecule.molecule_id", ondelete="CASCADE"), nullable=False
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     frame: Mapped[str] = mapped_column(FeatureFrame, nullable=False, default="none")
     a1_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     a2_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     a3_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     value_deg: Mapped[float] = mapped_column(Float, nullable=False)
-    measure_name: Mapped[str] = mapped_column(
-        String, nullable=False
-    )  # e.g., 'angle_DHA'
+    units: Mapped[str] = mapped_column(String, nullable=False, default="deg")
+    measure_name: Mapped[str] = mapped_column(String, nullable=False)
     feature_ver: Mapped[Optional[str]] = mapped_column(String)
 
-    __table_args__ = (
-        Index("idx_gang_measure_val", "measure_name", "value_deg"),
-        Index("idx_gang_molecule", "molecule_id"),
-    )
+    __table_args__ = (Index("idx_gang_measure_val", "measure_name", "value_deg"),)
+    conformer: Mapped["Conformer"] = relationship(back_populates="angles")
 
 
 class GeomDihedral(Base):
     __tablename__ = "geom_dihedral"
-
     geom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    molecule_id: Mapped[int] = mapped_column(
-        ForeignKey("molecule.molecule_id", ondelete="CASCADE"), nullable=False
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     frame: Mapped[str] = mapped_column(FeatureFrame, nullable=False, default="none")
     a1_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     a2_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     a3_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     a4_id: Mapped[int] = mapped_column(
-        ForeignKey("atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
     )
     value_deg: Mapped[float] = mapped_column(Float, nullable=False)
-    measure_name: Mapped[str] = mapped_column(
-        String, nullable=False
-    )  # e.g., 'phi1','phi2'
+    units: Mapped[str] = mapped_column(String, nullable=False)
+    measure_name: Mapped[str] = mapped_column(String, nullable=False)
     feature_ver: Mapped[Optional[str]] = mapped_column(String)
 
-    __table_args__ = (
-        Index("idx_gdih_measure_val", "measure_name", "value_deg"),
-        Index("idx_gdih_molecule", "molecule_id"),
-    )
+    __table_args__ = (Index("idx_gdih_measure_val", "measure_name", "value_deg"),)
+    conformer: Mapped["Conformer"] = relationship(back_populates="dihedrals")
 
 
 class TSFeatures(Base):
     __tablename__ = "ts_features"
-
-    molecule_id: Mapped[int] = mapped_column(
-        ForeignKey("molecule.molecule_id", ondelete="CASCADE"), primary_key=True
+    # One row per (TS conformer, LoT) —> allows energies at multiple LoTs
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
+    )
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("level_of_theory.lot_id", ondelete="RESTRICT"),
+        primary_key=True,
+        index=True,
     )
     imag_freq_cm1: Mapped[Optional[float]] = mapped_column(Float)
     irc_verified: Mapped[Optional[bool]] = mapped_column(Boolean)
-    lot_id: Mapped[int] = mapped_column(
-        ForeignKey("level_of_theory.lot_id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
-    lot: Mapped["LevelOfTheory"] = relationship(lambda: LevelOfTheory)
     E_TS: Mapped[Optional[float]] = mapped_column(Float)
     E_R1H: Mapped[Optional[float]] = mapped_column(Float)
     E_R2H: Mapped[Optional[float]] = mapped_column(Float)
     delta_E_dagger: Mapped[Optional[float]] = mapped_column(Float)
-    lot_id: Mapped[int] = mapped_column(
-        ForeignKey("level_of_theory.lot_id"), nullable=False
-    )
-    molecule: Mapped[Molecule] = relationship(
-        lambda: Molecule, back_populates="ts_features"
-    )
+
+    conformer: Mapped["Conformer"] = relationship(back_populates="ts_features")
+    lot: Mapped["LevelOfTheory"] = relationship()
 
 
 class LevelOfTheory(TimeStampMixin, Base):
@@ -302,14 +330,37 @@ class LevelOfTheory(TimeStampMixin, Base):
     lot_string: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("method", "basis", "solvent", name="uq_lot_method_basis_solvent"),
+        UniqueConstraint(
+            "method", "basis", "solvent", name="uq_lot_method_basis_solvent"
+        ),
         Index("idx_lot_method_basis", "method", "basis"),
     )
 
-class KineticsSet(TimeStampMixin, Base):
-    __tablename__ = "kinetics_set"
 
-    kin_set_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+class ReactionParticipant(TimeStampMixin, Base):
+    __tablename__ = "reaction_participant"
+    participant_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    reaction_id: Mapped[int] = mapped_column(
+        ForeignKey("reactions.reaction_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(MolRole, nullable=False)
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    __table_args__ = (UniqueConstraint("reaction_id", "role", name="uq_rxn_role"),)
+
+    reaction: Mapped["Reaction"] = relationship(back_populates="participants")
+    conformer: Mapped["Conformer"] = relationship()
+
+
+class RateModel(TimeStampMixin, Base):
+    __tablename__ = "rate_model"
+
+    rate_model_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     reaction_id: Mapped[int] = mapped_column(
         ForeignKey("reactions.reaction_id", ondelete="CASCADE"), nullable=False
     )
@@ -348,5 +399,5 @@ class KineticsSet(TimeStampMixin, Base):
     )
 
     reaction: Mapped[Reaction] = relationship(
-        lambda: Reaction, back_populates="kinetics_sets"
+        lambda: Reaction, back_populates="rate_models"
     )
