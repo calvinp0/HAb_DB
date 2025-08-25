@@ -1,0 +1,96 @@
+{
+  // Save as: .vscode/launch.json
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Load ONE SDF (ingest.load_all)",
+      "type": "python",
+      "request": "launch",
+      "module": "ingest.load_all",
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        // <- set your DB here (or rely on .env)
+        "DATABASE_URL": "postgresql+psycopg2://chem:chem@localhost:5432/hab_db"
+      },
+      "args": [
+        "--sdf",
+        "/home/calvin/code/chemprop_phd_customised/habnet/data/processed/sdf_data_correct_lbl_map/kfir_rxn_2.sdf",
+        "--source-label",
+        "vs-debug",
+        // uncomment as needed:
+        "--csv",
+        "/home/calvin/code/chemprop_phd_customised/habnet/data/preprocessing/atom_extra_feats_with_freq.csv",
+        "--kinetics-csv",
+        "/home/calvin/code/chemprop_phd_customised/habnet/data/processed/target_datakinetics_summary.csv",
+        "--mirror-geom-from-csv"
+        // "--csv-angles-are-deg",
+        // "--reuse-batch",
+        // "--dry-run",
+        // "--no-strict-roles",
+        // "--no-sanitize"
+      ]
+    },
+
+    {
+      "name": "Load DIR of SDFs (ingest.load_dir)",
+      "type": "python",
+      "request": "launch",
+      "module": "ingest.load_dir",
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DATABASE_URL": "postgresql+psycopg2://chem:chem@localhost:5432/hab_db"
+      },
+      "args": [
+        "--sdf-dir",
+        "${workspaceFolder}/path/to/sdf_dir",
+        "--source-label",
+        "vs-debug-batch",
+        "--recursive",
+        "--pattern",
+        "*.sdf"
+        // optional flags:
+        // "--csv", "${workspaceFolder}/path/to/atom_extra_feats.csv",
+        // "--kinetics-csv", "${workspaceFolder}/path/to/arrhenius.csv",
+        // "--mirror-geom-from-csv",
+        // "--csv-angles-are-deg",
+        // "--reuse-batch",
+        // "--dry-run",
+        // "--no-strict-roles",
+        // "--no-sanitize",
+        // "--stop-on-error"
+      ]
+    },
+
+    {
+      "name": "Pytest: sdf_reader tests",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DATABASE_URL": "postgresql+psycopg2://chem:chem@localhost:5432/hab_db"
+      },
+      "args": ["-q", "tests/test_sdf_reader.py"]
+    },
+
+    {
+      "name": "Pytest: all tests",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "justMyCode": true,
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "DATABASE_URL": "postgresql+psycopg2://chem:chem@localhost:5432/hab_db"
+      },
+      "args": ["-q"]
+    }
+  ]
+}

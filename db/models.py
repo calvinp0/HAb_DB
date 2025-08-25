@@ -87,7 +87,9 @@ class Molecule(TimeStampMixin, Base):
     source_file: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     record_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     geometry_hash: Mapped[Optional[str]] = mapped_column(String, index=True)
-
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("level_of_theory.lot_id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     __table_args__ = (
         UniqueConstraint(
             "reaction_id", "role", "geometry_hash", name="uq_mol_rxn_role_geom"
@@ -103,6 +105,9 @@ class Molecule(TimeStampMixin, Base):
     atoms: Mapped[List[Atom]] = relationship(
         lambda: Atom, back_populates="molecule", cascade="all, delete-orphan"
     )
+
+    lot: Mapped["LevelOfTheory"] = relationship(lambda: LevelOfTheory, backref="molecules")
+
     ts_features: Mapped[Optional[TSFeatures]] = relationship(
         lambda: TSFeatures,
         back_populates="molecule",
@@ -269,16 +274,37 @@ class TSFeatures(Base):
     )
     imag_freq_cm1: Mapped[Optional[float]] = mapped_column(Float)
     irc_verified: Mapped[Optional[bool]] = mapped_column(Boolean)
-    level_of_theory: Mapped[Optional[str]] = mapped_column(String)
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("level_of_theory.lot_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    lot: Mapped["LevelOfTheory"] = relationship(lambda: LevelOfTheory)
     E_TS: Mapped[Optional[float]] = mapped_column(Float)
     E_R1H: Mapped[Optional[float]] = mapped_column(Float)
     E_R2H: Mapped[Optional[float]] = mapped_column(Float)
     delta_E_dagger: Mapped[Optional[float]] = mapped_column(Float)
-
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("level_of_theory.lot_id"), nullable=False
+    )
     molecule: Mapped[Molecule] = relationship(
         lambda: Molecule, back_populates="ts_features"
     )
 
+
+class LevelOfTheory(TimeStampMixin, Base):
+    __tablename__ = "level_of_theory"
+
+    lot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    method: Mapped[str] = mapped_column(String, nullable=False)
+    basis: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    solvent: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    lot_string: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("method", "basis", "solvent", name="uq_lot_method_basis_solvent"),
+        Index("idx_lot_method_basis", "method", "basis"),
+    )
 
 class KineticsSet(TimeStampMixin, Base):
     __tablename__ = "kinetics_set"

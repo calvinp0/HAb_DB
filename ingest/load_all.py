@@ -21,6 +21,8 @@ from db.models import (
     GeomAngle,
     GeomDihedral,
     KineticsSet,
+    LevelOfTheory,
+    TSFeatures,
 )
 from db.utils import geom_hash
 from ingest.sdf_reader import iter_triplets
@@ -61,6 +63,42 @@ def _parse_path(s: Optional[str]) -> Optional[Sequence[int]]:
         return None
     return None
 
+
+def _parse_bool(v) -> Optional[bool]:
+    if v is None: return None
+    s = str(v).strip().lower()
+    if s in {"1","true","t","yes","y"}: return True
+    if s in {"0","false","f","no","n"}: return False
+    return None
+
+def _parse_float_or_none(v) -> Optional[float]:
+    try:
+        return float(v) if v is not None and str(v).strip() != "" else None
+    except Exception:
+        return None
+
+def _extract_ts_fields(props: dict) -> dict:
+    def first(*keys):
+        for k in keys:
+            if k in props and str(props[k]).strip() != "":
+                return props[k]
+        return None
+
+    imag = first("imag_freq_cm1", "nu_imag_cm1", "v_imag_cm1", "imaginary_frequency_cm1")
+    irc  = first("irc_verified", "irc_ok", "irc")
+    e_ts = first("E_TS", "E_ts", "E(TS)", "E_ts_hartree", "E_TS_kJ_mol")
+    e_r1 = first("E_R1H", "E_r1h", "E(R1H)")
+    e_r2 = first("E_R2H", "E_r2h", "E(R2H)")
+    de   = first("delta_E_dagger", "dE_dagger", "Ea", "Ea_kJ_mol")
+
+    return {
+        "imag_freq_cm1": _parse_float_or_none(imag),
+        "irc_verified":  _parse_bool(irc),
+        "E_TS":          _parse_float_or_none(e_ts),
+        "E_R1H":         _parse_float_or_none(e_r1),
+        "E_R2H":         _parse_float_or_none(e_r2),
+        "delta_E_dagger":_parse_float_or_none(de),
+    }
 
 def _index_csv(csv_path: Path) -> Dict[str, Dict[str, Dict[int, dict]]]:
     """Index CSV by reaction → role (R1H/R2H/TS) → focus_atom_idx → row dict."""
@@ -295,6 +333,7 @@ def upsert_molecule(
     source_file: str | None,
     record_index: int | None,
     ghash: str | None,
+    lot_id: int | None = None,
 ):
     """
     UPSERT into molecule on (reaction_id, role) and return molecule_id.
@@ -316,6 +355,7 @@ def upsert_molecule(
             props=props,
             source_file=source_file,
             geometry_hash=ghash,
+            lot_id=lot_id
         )
         # conflict target must match the UNIQUE constraint:
         .on_conflict_do_update(
@@ -332,12 +372,62 @@ def upsert_molecule(
                 "record_index": record_index,
                 "updated_at": func.now(),
                 "geometry_hash": ghash,
+                "lot_id": lot_id
             },
         )
         .returning(Molecule.__table__.c.molecule_id)
     )
     return session.scalar(stmt)
 
+
+
+def upsert_ts_features(
+    session: Session,
+    molecule_id: int,
+    lot_id: int,
+    fields: dict,
+) -> None:
+    tbl = TSFeatures.__table__
+    stmt = (
+        pg_insert(tbl)
+        .values(
+            molecule_id=molecule_id,
+            lot_id=lot_id,
+            imag_freq_cm1=fields.get("imag_freq_cm1"),
+            irc_verified=fields.get("irc_verified"),
+            E_TS=fields.get("E_TS"),
+            E_R1H=fields.get("E_R1H"),
+            E_R2H=fields.get("E_R2H"),
+            delta_E_dagger=fields.get("delta_E_dagger"),
+        )
+        .on_conflict_do_update(
+            index_elements=[tbl.c.molecule_id],
+            set_={
+                "lot_id": tbl.bindparam("lot_id"),
+                "imag_freq_cm1": tbl.bindparam("imag_freq_cm1"),
+                "irc_verified": tbl.bindparam("irc_verified"),
+                "E_TS": tbl.bindparam("E_TS"),
+                "E_R1H": tbl.bindparam("E_R1H"),
+                "E_R2H": tbl.bindparam("E_R2H"),
+                "delta_E_dagger": tbl.bindparam("delta_E_dagger"),
+            },
+        )
+    )
+    session.execute(stmt)
+
+def get_or_create_lot(session: Session, method: str, basis: str | None, solvent: str | None) -> int:
+    lot_string = f"{method}/{basis or ''}".strip("/")
+    q = select(LevelOfTheory).where(LevelOfTheory.method==method,
+                                    LevelOfTheory.basis==basis,
+                                    LevelOfTheory.solvent==solvent)
+    lot = session.scalar(q)
+    if lot:
+        return lot.lot_id
+
+    lot = LevelOfTheory(method=method, basis=basis, solvent=solvent, lot_string=lot_string)
+    session.add(lot)
+    session.flush()
+    return lot.lot_id
 
 # -------------------------- core load ----------------------------
 
@@ -427,6 +517,12 @@ def load_all(
                 spin_mult = Descriptors.NumRadicalElectrons(rmol) + 1
                 mw = Descriptors.MolWt(rmol)
                 ghash = geom_hash(rmol)
+                lot_method = (rec.props.get("lot_method") or "").strip() or None
+                lot_basis = (rec.props.get("lot_basis") or "").strip() or None
+                lot_solvent = (rec.props.get("lot_solvent") or "").strip() or None
+                if not lot_method:
+                    lot_method, lot_basis, lot_solvent = "unknown", None, None
+                lot_id = get_or_create_lot(session, lot_method, lot_basis, lot_solvent)
                 if not dry_run:
                     molecule_id = upsert_molecule(
                         session,
@@ -441,8 +537,18 @@ def load_all(
                         source_file=rec.reaction_name,
                         record_index=rec.record_index,
                         ghash=ghash,
+                        lot_id=lot_id,
                     )
                     stats["molecules_upserted"] += 1
+                    if rec.role.lower() == "ts" and lot_id is not None:
+                        print("Upserting TS features for molecule_id", molecule_id, "lot_id", lot_id)
+                        ts_fields = _extract_ts_fields(rec.props or {})
+                        # Only write if we have at least *something* to store
+                        print("TS fields extracted:", ts_fields)
+                        if any(v is not None for v in ts_fields.values()):
+                            print("  with fields:", ts_fields)
+                            upsert_ts_features(session, molecule_id=molecule_id, lot_id=lot_id, fields=ts_fields)
+
                 else:
                     molecule_id = -1  # simulate
 
