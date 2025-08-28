@@ -25,15 +25,27 @@ from db.models import (
     RateModel,
     LevelOfTheory,
     TSFeatures,
+    WellFeatures,
+    NASAPolynomial,
+    CPCurve,
 )
 from db.utils import geom_hash
 from ingest.sdf_reader import iter_triplets
 from rdkit import Chem
 from rdkit.Chem import Descriptors
+from ingest.utils import (
+    _extract_nasa_polynomials_with_rmse,
+    _extract_cp_curve,
+    _to_J_per_molK,
+    map_triplet_key_atoms,
+)
 
 ROLE_MAP = {"r1h": "R1H", "r2h": "R2H", "ts": "TS"}
 FRAME_MAP = {"R1H": "ref_d_hydrogen", "R2H": "ref_a_hydrogen", "TS": "none"}
-
+HARTREE_TO_KJ_MOL = 2625.49962
+CAL_TO_KJ_MOL = 4.184
+J_TO_KJ_MOL = 0.001
+REQUIRED_ROLES = ("R1H", "R2H", "TS")
 # -------------------------- CSV helpers --------------------------
 
 
@@ -84,32 +96,6 @@ def _parse_float_or_none(v) -> Optional[float]:
         return None
 
 
-def _extract_ts_fields(props: dict) -> dict:
-    def first(*keys):
-        for k in keys:
-            if k in props and str(props[k]).strip() != "":
-                return props[k]
-        return None
-
-    imag = first(
-        "imag_freq_cm1", "nu_imag_cm1", "v_imag_cm1", "imaginary_frequency_cm1"
-    )
-    irc = first("irc_verified", "irc_ok", "irc")
-    e_ts = first("E_TS", "E_ts", "E(TS)", "E_ts_hartree", "E_TS_kJ_mol")
-    e_r1 = first("E_R1H", "E_r1h", "E(R1H)")
-    e_r2 = first("E_R2H", "E_r2h", "E(R2H)")
-    de = first("delta_E_dagger", "dE_dagger", "Ea", "Ea_kJ_mol")
-
-    return {
-        "imag_freq_cm1": _parse_float_or_none(imag),
-        "irc_verified": _parse_bool(irc),
-        "E_TS": _parse_float_or_none(e_ts),
-        "E_R1H": _parse_float_or_none(e_r1),
-        "E_R2H": _parse_float_or_none(e_r2),
-        "delta_E_dagger": _parse_float_or_none(de),
-    }
-
-
 def _index_csv(csv_path: Path) -> Dict[str, Dict[str, Dict[int, dict]]]:
     """Index CSV by reaction → role (R1H/R2H/TS) → focus_atom_idx → row dict."""
     idx: Dict[str, Dict[str, Dict[int, dict]]] = {}
@@ -129,6 +115,47 @@ def _index_csv(csv_path: Path) -> Dict[str, Dict[str, Dict[int, dict]]]:
 
 
 # ------------------------- Kinetics CSV --------------------------
+
+
+def reaction_fully_loaded(session, reaction_name: str) -> bool:
+    rxn = session.scalar(
+        select(Reaction).where(Reaction.reaction_name == reaction_name)
+    )
+    if not rxn:
+        return False
+    roles = set(
+        session.scalars(
+            select(ReactionParticipant.role).where(
+                ReactionParticipant.reaction_id == rxn.reaction_id
+            )
+        )
+    )
+    if not all(r in roles for r in REQUIRED_ROLES):
+        return False
+    # ensure each participant’s conformer has atoms already
+    parts = session.scalars(
+        select(ReactionParticipant).where(
+            ReactionParticipant.reaction_id == rxn.reaction_id
+        )
+    ).all()
+    by_role = {p.role.upper(): p for p in parts}
+    for r in REQUIRED_ROLES:
+        p = by_role.get(r)
+        if not p:
+            return False
+        n_atoms = (
+            session.scalar(
+                select(func.count())
+                .select_from(ConformerAtom)
+                .where(ConformerAtom.conformer_id == p.conformer_id)
+            )
+            or 0
+        )
+        if n_atoms == 0:
+            return False
+    return True
+
+
 def _parse_float(s):
     if s is None:
         return None
@@ -172,6 +199,125 @@ def _direction_and_model(label: str):
     if not model:
         model = "unknown"
     return direction, model
+
+
+def _to_kj(value: Optional[float], units: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    u = (units or "").strip().lower()
+    if not u or u in {"kj/mol", "kjmol", "kj_per_mol", "kjmol^-1", "kjmol-1"}:
+        return value
+    if u in {"hartree", "eh"}:
+        return value * HARTREE_TO_KJ_MOL
+    if u in {"cal", "cal/mol", "cal_per_mol", "calmol^-1", "calmol-1"}:
+        return value * CAL_TO_KJ_MOL
+    if u in {"j/mol", "j_per_mol", "jmol^-1", "jmol-1"}:
+        return value * J_TO_KJ_MOL
+    return None
+
+
+def _first(props: dict, *keys):
+    for k in keys:
+        if k in props and str(props[k]).strip() != "":
+            return props[k]
+    return None
+
+
+def _extract_ts_fields(props: dict) -> dict:
+    def first(*keys):
+        for k in keys:
+            if k in props and str(props[k]).strip() != "":
+                return props[k]
+        return None
+
+    # Imaginary frequency: prefer explicit ts_imag_freq, else frequency_value
+    imag = first("ts_imag_freq_cm1", "imag_freq_cm1", "frequency_value")
+    units = (props.get("frequency_units") or "").strip().lower()
+    imag_val = _parse_float_or_none(imag)
+    if imag_val is not None and "freq" in (props.get("frequency_units") or "").lower():
+        if units not in {"cm^-1", "cm-1", "1/cm"}:
+            imag_val = None
+
+    return {
+        "imag_freq_cm1": imag_val,
+        # other fields left for future, may be None
+        "irc_verified": _parse_bool(first("irc_verified", "irc_ok", "irc")),
+        "E_TS": _parse_float_or_none(
+            first("E0_value", "E0_kJmol")
+        ),  # optional absolute TS energy
+    }
+
+
+def _extract_well_fields(props: dict) -> dict:
+    """Grab common keys for well energietics; normalize to kJ/mole where appropriate"""
+
+    # E0 / electronic energy (store as E_elec)
+    E0_kj = _first(props, "E0_kJmol", "E0_kJ/mol", "E0_kJ_per_mol")
+    E0_val = _first(props, "E0_value", "E_value", "E_elec", "E")
+    E0_units = _first(props, "E0_units", "E_units", "E_elec_units")
+
+    # Enthalpy & Gibbs at 298 K
+    H298_kj = _first(props, "H298_kJmol", "H298_kJ/mol")
+    H298_val = _first(props, "H298_value", "enthalpy_298", "H_298")
+    H298_units = _first(props, "H298_units", "enthalpy_units")
+
+    G298_kj = _first(props, "G298_kJmol", "G298_kJ/mol")
+    G298_val = _first(props, "G298_value", "gibbs_298", "G_298")
+    G298_units = _first(props, "G298_units", "gibbs_units")
+
+    # ZPE (optional)
+    ZPE_kj = _first(props, "ZPE_kJmol", "ZPE_kJ/mol")
+    ZPE_val = _first(props, "ZPE", "zero_point_energy", "zero_point_kJ_mol")
+    ZPE_units = _first(props, "ZPE_units", "zpe_units")
+
+    # Get S298
+    S298_kj = _first(props, "S298_kJmol", "S298_kJ/mol")
+    S298_val = _first(props, "S298", "entropy_298", "S_298", "S298_value")
+    S298_units = _first(props, "S298_units", "entropy_units")
+
+    # parse to floats
+    E0_kj_f = _parse_float_or_none(E0_kj)
+    H298_kj_f = _parse_float_or_none(H298_kj)
+    G298_kj_f = _parse_float_or_none(G298_kj)
+    S298_kj_f = _parse_float_or_none(S298_kj)
+    ZPE_kj_f = _parse_float_or_none(ZPE_kj)
+
+    E0_val_f = _to_kj(_parse_float_or_none(E0_val), E0_units)
+    H298_val_f = _to_kj(_parse_float_or_none(H298_val), H298_units)
+    S298_val_f = _to_J_per_molK(_parse_float_or_none(S298_val), S298_units)
+    S298_kj_f = _parse_float_or_none(S298_kj)
+    G298_val_f = _to_kj(_parse_float_or_none(G298_val), G298_units)
+    ZPE_val_f = _to_kj(_parse_float_or_none(ZPE_val), ZPE_units)
+
+    E_elec = E0_kj_f if E0_kj_f is not None else E0_val_f
+    E_elec_units = "kJ/mol" if E_elec is not None else None
+    H298 = H298_kj_f if H298_kj_f is not None else H298_val_f
+    H298_units = "kJ/mol" if H298 is not None else None
+    S298 = S298_val_f if S298_val_f is not None else S298_kj_f
+    S298_units_out = "J/(mol*K)" if S298 is not None else None
+    G298 = G298_kj_f if G298_kj_f is not None else G298_val_f
+    G298_units = "kJ/mol" if G298 is not None else None
+    ZPE = ZPE_kj_f if ZPE_kj_f is not None else ZPE_val_f
+    ZPE_units = "kJ/mol" if ZPE is not None else None
+
+    return {
+        "E_elec": E_elec,
+        "E_elec_units": E_elec_units,
+        "ZPE": ZPE,
+        "ZPE_units": ZPE_units,
+        "H298": H298,
+        "H298_units": H298_units,
+        "S298": S298,
+        "S298_units": S298_units_out,
+        "G298": G298,
+        "G298_units": G298_units,
+        "meta": {
+            "E0_units": E0_units,
+            "H298_units": H298_units,
+            "G298_units": G298_units,
+            "ZPE_units": ZPE_units,
+        },
+    }
 
 
 def _index_kinetics_csv_rmg(csv_path: Path) -> Dict[str, list[dict]]:
@@ -232,58 +378,10 @@ def _index_kinetics_csv_rmg(csv_path: Path) -> Dict[str, list[dict]]:
     return idx
 
 
-def _merge_kinetics(session: Session, reaction_id: int, row: dict):
-    # match the UniqueConstraint on kinetics_set
-    q = select(KineticsSet).where(
-        KineticsSet.reaction_id == reaction_id,
-        KineticsSet.direction == row["direction"],
-        KineticsSet.source == row.get("source"),
-        KineticsSet.reference == row.get("reference"),
-        KineticsSet.Tmin_K == row.get("Tmin_K"),
-        KineticsSet.Tmax_K == row.get("Tmax_K"),
-    )
-    existing = session.scalar(q)
-    if existing:
-        # update in-place (best-effort)
-        for k in (
-            "model",
-            "A",
-            "n",
-            "Ea_kJ_mol",
-            "computed_from",
-            "dA_factor",
-            "dn_abs",
-            "dEa_kJ_mol",
-            "meta",
-        ):
-            v = row.get(k)
-            if v is not None:
-                setattr(existing, k, v)
-        return existing
-
-    ks = KineticsSet(
-        reaction_id=reaction_id,
-        direction=row["direction"],
-        model=row.get("model") or "ModifiedArrhenius",
-        A=row["A"],
-        n=row.get("n"),
-        Ea_kJ_mol=row["Ea_kJ_mol"],
-        Tmin_K=row["Tmin_K"],
-        Tmax_K=row["Tmax_K"],
-        source=row.get("source"),
-        reference=row.get("reference"),
-        computed_from=row.get("computed_from"),
-        dA_factor=row.get("dA_factor"),
-        dn_abs=row.get("dn_abs"),
-        dEa_kJ_mol=row.get("dEa_kJ_mol"),
-        meta=row.get("meta"),
-    )
-    session.add(ks)
-    return ks
-
-
 # unit helpers (prefer per-row units; fallback to CLI flag for legacy files)
-def _angle_deg(val: Optional[float], units: Optional[str], csv_angles_are_deg: bool) -> Optional[float]:
+def _angle_deg(
+    val: Optional[float], units: Optional[str], csv_angles_are_deg: bool
+) -> Optional[float]:
     if val is None:
         return None
     u = (units or "").strip().lower()
@@ -293,6 +391,7 @@ def _angle_deg(val: Optional[float], units: Optional[str], csv_angles_are_deg: b
         return val * 180.0 / math.pi
     # fallback to flag if units missing
     return val if csv_angles_are_deg else (val * 180.0 / math.pi)
+
 
 def _radius_ang(val: Optional[float], units: Optional[str]) -> Optional[float]:
     if val is None:
@@ -306,6 +405,7 @@ def _radius_ang(val: Optional[float], units: Optional[str]) -> Optional[float]:
         return val * 0.01
     # assume Å if missing
     return val
+
 
 # -------------------------- role labels --------------------------
 
@@ -338,6 +438,43 @@ def _ensure_rdkit():
 
 
 # -------------------------- Upsert ------------------------------
+def upsert_nasa_polynomial(session, conformer_id: int, poly: dict):
+    tbl = NASAPolynomial.__table__
+    a1, a2, a3, a4, a5, a6, a7 = poly["coeffs"]
+    stmt = (
+        pg_insert(tbl)
+        .values(
+            conformer_id=conformer_id,
+            form=poly["form"],
+            Tmin_K=poly["Tmin_K"],
+            Tmax_K=poly["Tmax_K"],
+            a1=a1,
+            a2=a2,
+            a3=a3,
+            a4=a4,
+            a5=a5,
+            a6=a6,
+            a7=a7,
+            source=poly.get("source"),
+            fit_rmse=poly.get("fit_rmse"),
+        )
+        .on_conflict_do_update(
+            index_elements=["conformer_id", "Tmin_K", "Tmax_K", "form"],
+            set_={
+                "a1": a1,
+                "a2": a2,
+                "a3": a3,
+                "a4": a4,
+                "a5": a5,
+                "a6": a6,
+                "a7": a7,
+                "source": poly.get("source"),
+                "fit_rmse": poly.get("fit_rmse"),
+                "updated_at": func.now(),
+            },
+        )
+    )
+    session.execute(stmt)
 
 
 def upsert_species(
@@ -380,65 +517,130 @@ def upsert_species(
     return sp.species_id
 
 
-
-def upsert_conformer(session, species_id: int, lot_id: int,
-                     mol_rdkit_smiles: str, geometry_hash: str,
-                     well_label: str|None, is_ts: bool):
+def upsert_conformer(
+    session,
+    species_id: int,
+    lot_id: int,
+    mol_rdkit_smiles: str,
+    geometry_hash: str,
+    well_label: str | None,
+    is_ts: bool,
+):
     tbl = Conformer.__table__
-    ins = (
-        pg_insert(tbl)
-        .values(
-            species_id=species_id,
-            lot_id=lot_id,
-            geometry_hash=geometry_hash,
-            well_label=well_label,
-            is_ts=is_ts,
-            mol=func.mol_from_smiles(mol_rdkit_smiles),
-        )
+    ins = pg_insert(tbl).values(
+        species_id=species_id,
+        lot_id=lot_id,
+        geometry_hash=geometry_hash,
+        well_label=well_label,
+        is_ts=is_ts,
+        mol=func.mol_from_smiles(mol_rdkit_smiles),
     )
 
-    stmt = (
-        ins.on_conflict_do_update(
-            # must match a unique/PK constraint on the table:
-            index_elements=[tbl.c.species_id, tbl.c.lot_id, tbl.c.geometry_hash],
-            set_={
-                # take the incoming values on conflict
-                "well_label": ins.excluded.well_label,
-                "is_ts": ins.excluded.is_ts,
-                # re-generate mol from the new SMILES
-                "mol": func.mol_from_smiles(mol_rdkit_smiles),
-                "updated_at": func.now(),
-            },
-        )
-        .returning(tbl.c.conformer_id)
-    )
+    stmt = ins.on_conflict_do_update(
+        # must match a unique/PK constraint on the table:
+        index_elements=[tbl.c.species_id, tbl.c.lot_id, tbl.c.geometry_hash],
+        set_={
+            # take the incoming values on conflict
+            "well_label": ins.excluded.well_label,
+            "is_ts": ins.excluded.is_ts,
+            # re-generate mol from the new SMILES
+            "mol": func.mol_from_smiles(mol_rdkit_smiles),
+            "updated_at": func.now(),
+        },
+    ).returning(tbl.c.conformer_id)
     return session.scalar(stmt)
 
 
 def upsert_ts_features(session, conformer_id: int, lot_id: int, fields: dict):
     tbl = TSFeatures.__table__
+    ins = pg_insert(tbl).values(
+        conformer_id=conformer_id,
+        lot_id=lot_id,
+        imag_freq_cm1=fields.get("imag_freq_cm1"),
+        irc_verified=fields.get("irc_verified"),
+        E_TS=fields.get("E_TS"),
+    )
+    stmt = ins.on_conflict_do_update(
+        index_elements=[tbl.c.conformer_id, tbl.c.lot_id],  # <= key change
+        set_={
+            "imag_freq_cm1": ins.excluded.imag_freq_cm1,
+            "irc_verified": ins.excluded.irc_verified,
+            "E_TS": ins.excluded.E_TS,
+            "updated_at": func.now(),
+        },
+    )
+    session.execute(stmt)
+
+
+def ensure_atom_role(session, atom_id: int | None, role: str) -> None:
+    """Insert (atom_id, role) into atom_role_map if missing."""
+    if not atom_id or not role:
+        return
+    tbl = AtomRoleMap.__table__
+    stmt = (
+        pg_insert(tbl)
+        .values(atom_id=atom_id, role=role)
+        .on_conflict_do_nothing(index_elements=[tbl.c.atom_id, tbl.c.role])
+    )
+    session.execute(stmt)
+
+
+def upsert_cp_curve(session, conformer_id: int, curve: dict):
+    tbl = CPCurve.__table__  # ORM model wrapping the table above
     stmt = (
         pg_insert(tbl)
         .values(
             conformer_id=conformer_id,
-            lot_id=lot_id,
-            imag_freq_cm1=fields.get("imag_freq_cm1"),
-            irc_verified=fields.get("irc_verified"),
-            E_TS=fields.get("E_TS"),
-            E_R1H=fields.get("E_R1H"),
-            E_R2H=fields.get("E_R2H"),
-            delta_E_dagger=fields.get("delta_E_dagger"),
+            T_K=curve["T_K"],
+            Cp_J_per_molK=curve["Cp_J_per_molK"],
+            source=curve.get("source"),
+            raw_units=curve.get("raw_units"),
         )
         .on_conflict_do_update(
             index_elements=[tbl.c.conformer_id],
             set_={
-                "lot_id": tbl.bindparam("lot_id"),
-                "imag_freq_cm1": tbl.bindparam("imag_freq_cm1"),
-                "irc_verified": tbl.bindparam("irc_verified"),
-                "E_TS": tbl.bindparam("E_TS"),
-                "E_R1H": tbl.bindparam("E_R1H"),
-                "E_R2H": tbl.bindparam("E_R2H"),
-                "delta_E_dagger": tbl.bindparam("delta_E_dagger"),
+                "T_K": curve["T_K"],
+                "Cp_J_per_molK": curve["Cp_J_per_molK"],
+                "source": curve.get("source"),
+                "raw_units": curve.get("raw_units"),
+                "updated_at": func.now(),
+            },
+        )
+    )
+    session.execute(stmt)
+
+
+def upsert_well_features(session: Session, conformer_id: int, fields: dict) -> None:
+    tbl = WellFeatures.__table__
+    # choose PK column dynamically
+    pk_col = getattr(tbl.c, "conformer_id", None)
+    vals = {
+        (pk_col.key): conformer_id,
+        "E_elec": fields.get("E_elec"),
+        "E_elec_units": fields.get("E_elec_units"),
+        "ZPE": fields.get("ZPE"),
+        "ZPE_units": fields.get("ZPE_units"),
+        "H298": fields.get("H298"),
+        "H298_units": fields.get("H298_units"),
+        "G298": fields.get("G298"),
+        "G298_units": fields.get("G298_units"),
+        "S298": fields.get("S298"),
+        "S298_units": fields.get("S298_units"),
+        "meta": fields.get("meta"),
+    }
+    stmt = (
+        pg_insert(tbl)
+        .values(**vals)
+        .on_conflict_do_update(
+            index_elements=[pk_col],
+            set_={
+                "E_elec": vals["E_elec"],
+                "ZPE": vals["ZPE"],
+                "H298": vals["H298"],
+                "G298": vals["G298"],
+                "S298": vals["S298"],
+                "S298_units": vals["S298_units"],
+                "meta": vals["meta"],
                 "updated_at": func.now(),
             },
         )
@@ -537,6 +739,7 @@ def load_all(
     sanitize: bool = True,
     kinetics_csv: Optional[Path] = None,
     reuse_batch: bool = False,
+    skip_if_loaded: bool = True,
     dry_run: bool = False,
 ) -> None:
     stats = {
@@ -574,7 +777,13 @@ def load_all(
             sdf_path, strict_roles=strict_roles, sanitize=sanitize
         ):
             rxn_name = trip.reaction_name or "unnamed_rxn"
-
+            if (
+                skip_if_loaded
+                and not dry_run
+                and reaction_fully_loaded(session, rxn_name)
+            ):
+                print(f"[skip] Reaction '{rxn_name}' already loaded; skipping.")
+                continue
             if not dry_run:
                 reaction = session.scalar(
                     select(Reaction).where(Reaction.reaction_name == rxn_name)
@@ -596,6 +805,7 @@ def load_all(
                 reaction.reaction_id = -1  # sentinel
 
             role_to_idx2id: Dict[str, Dict[int, int]] = {}
+            conf_id_by_role: Dict[str, int] = {}
             stats["reactions_seen"] += 1
             # Insert Molecules + Atoms (XYZ)
             for role, rec in trip.records.items():
@@ -619,6 +829,7 @@ def load_all(
                     lot_method, lot_basis, lot_solvent = "unknown", None, None
                 lot_id = get_or_create_lot(session, lot_method, lot_basis, lot_solvent)
                 if not dry_run:
+                    is_ts = rec.role.upper() == "TS"
                     species_id = upsert_species(
                         session,
                         smiles=smiles,
@@ -628,7 +839,6 @@ def load_all(
                         mw=mw,
                         props=rec.props,
                     )
-                    is_ts = rec.role.upper() == "TS"
                     conformer_id = upsert_conformer(
                         session,
                         species_id=species_id,
@@ -637,6 +847,14 @@ def load_all(
                         geometry_hash=ghash,
                         well_label=rec.props.get("well_label"),
                         is_ts=is_ts,
+                    )
+                    atoms_exist = (
+                        session.scalar(
+                            select(func.count())
+                            .select_from(ConformerAtom)
+                            .where(ConformerAtom.conformer_id == conformer_id)
+                        )
+                        > 0
                     )
                     link_participant(
                         session,
@@ -654,33 +872,79 @@ def load_all(
                                 lot_id=lot_id,
                                 fields=ts_fields,
                             )
+                    else:
+                        for poly in (
+                            _extract_nasa_polynomials_with_rmse(rec.props or {}) or []
+                        ):
+                            upsert_nasa_polynomial(
+                                session, conformer_id=conformer_id, poly=poly
+                            )
 
+                        for curve in _extract_cp_curve(rec.props or {}) or []:
+                            upsert_cp_curve(
+                                session, conformer_id=conformer_id, curve=curve
+                            )
+
+                    # Well Features
+                    wf = _extract_well_fields(rec.props or {})
+                    upsert_well_features(session, conformer_id=conformer_id, fields=wf)
+                    # if any(
+                    #     wf.get(k) is not None for k in ("E_elec", "ZPE", "H298", "G298")
+                    # ):
+                    #     upsert_well_features(
+                    #         session, conformer_id=conformer_id, fields=wf
+                    #     )
+
+                    conf_id_by_role[role] = conformer_id
                 else:
                     molecule_id = -1  # simulate
 
                 # RDKit for coordinates
 
-                conf = rmol.GetConformer()
-                idx2id: Dict[int, int] = {}
-                for i, atom in enumerate(rmol.GetAtoms()):
-                    if not dry_run:
-                        p = conf.GetAtomPosition(i)
-                        a = ConformerAtom(
-                            conformer_id=conformer_id,
-                            atom_idx=i,
-                            atomic_num=atom.GetAtomicNum(),
-                            formal_charge=atom.GetFormalCharge(),
-                            is_aromatic=atom.GetIsAromatic(),
-                            xyz=[p.x, p.y, p.z],
+                atoms_exist = False
+                if not dry_run:
+                    atoms_exist = (
+                        session.scalar(
+                            select(func.count())
+                            .select_from(ConformerAtom)
+                            .where(ConformerAtom.conformer_id == conformer_id)
                         )
-                        session.add(a)
-                        session.flush()
-                        idx2id[i] = a.atom_id
-                        stats["atoms_inserted"] += 1
-                    else:
-                        idx2id[i] = -1  # simulate
-                role_to_idx2id[role] = idx2id
+                        > 0
+                    )
 
+                idx2id: Dict[int, int] = {}
+
+                if dry_run:
+                    # simulate mapping for each atom index without DB writes
+                    idx2id = {i: -1 for i in range(rmol.GetNumAtoms())}
+
+                else:
+                    if not atoms_exist:
+                        conf = rmol.GetConformer()
+                        for i, atom in enumerate(rmol.GetAtoms()):
+                            p = conf.GetAtomPosition(i)
+                            a = ConformerAtom(
+                                conformer_id=conformer_id,
+                                atom_idx=i,
+                                atomic_num=atom.GetAtomicNum(),
+                                formal_charge=atom.GetFormalCharge(),
+                                is_aromatic=atom.GetIsAromatic(),
+                                xyz=[p.x, p.y, p.z],
+                            )
+                            session.add(a)
+                            session.flush()
+                            idx2id[i] = a.atom_id
+                            stats["atoms_inserted"] += 1
+                    else:
+                        # reconstruct idx2id from DB instead of re-inserting
+                        for a in session.scalars(
+                            select(ConformerAtom).where(
+                                ConformerAtom.conformer_id == conformer_id
+                            )
+                        ):
+                            idx2id[a.atom_idx] = a.atom_id
+
+                role_to_idx2id[role] = idx2id
                 # AtomRoleMap from mol_properties
                 mp = rec.mol_properties or {}
                 for i_idx, rname in _mol_properties_to_roles(mp).items():
@@ -688,7 +952,7 @@ def load_all(
                         rname in {"donor", "acceptor", "d_hydrogen", "a_hydrogen"}
                         and not dry_run
                     ):
-                        session.add(AtomRoleMap(atom_id=idx2id.get(i_idx), role=rname))
+                        ensure_atom_role(session, idx2id.get(i_idx), rname)
 
             for row in kin_index.get(rxn_name, []):
                 if not dry_run:
@@ -746,12 +1010,14 @@ def load_all(
                                 if a1 and a2:
                                     session.add(
                                         GeomDistance(
-                                            conformer_id=session.get(ConformerAtom, a1).conformer_id,
+                                            conformer_id=session.get(
+                                                ConformerAtom, a1
+                                            ).conformer_id,
                                             frame=FRAME_MAP[role],
                                             a1_id=a1,
                                             a2_id=a2,
                                             value_ang=_radius_ang(radius, radius_units),
-                                            units=row.get('radius_units'),
+                                            units=row.get("radius_units"),
                                             measure_name="csv_radius",
                                             feature_ver="csv_v1",
                                         )
@@ -765,13 +1031,19 @@ def load_all(
                                 if a1 and a2 and a3:
                                     session.add(
                                         GeomAngle(
-                                            conformer_id=session.get(ConformerAtom, a1).conformer_id,
+                                            conformer_id=session.get(
+                                                ConformerAtom, a1
+                                            ).conformer_id,
                                             frame=FRAME_MAP[role],
                                             a1_id=a1,
                                             a2_id=a2,
                                             a3_id=a3,
-                                            value_deg=_angle_deg(angle_v, angle_units, csv_angles_are_deg=csv_angles_are_deg),
-                                            units=row.get('angle_units'),
+                                            value_deg=_angle_deg(
+                                                angle_v,
+                                                angle_units,
+                                                csv_angles_are_deg=csv_angles_are_deg,
+                                            ),
+                                            units=row.get("angle_units"),
                                             measure_name="csv_angle",
                                             feature_ver="csv_v1",
                                         )
@@ -786,22 +1058,37 @@ def load_all(
                                 if a1 and a2 and a3 and a4:
                                     session.add(
                                         GeomDihedral(
-                                            conformer_id=session.get(ConformerAtom, a1).conformer_id,
+                                            conformer_id=session.get(
+                                                ConformerAtom, a1
+                                            ).conformer_id,
                                             frame=FRAME_MAP[role],
                                             a1_id=a1,
                                             a2_id=a2,
                                             a3_id=a3,
                                             a4_id=a4,
-                                            value_deg=_angle_deg(dihed_v, dihed_units, csv_angles_are_deg=csv_angles_are_deg),
-                                            units = row.get('dihedral_units'),
+                                            value_deg=_angle_deg(
+                                                dihed_v,
+                                                dihed_units,
+                                                csv_angles_are_deg=csv_angles_are_deg,
+                                            ),
+                                            units=row.get("dihedral_units"),
                                             measure_name="csv_dihedral",
                                             feature_ver="csv_v1",
                                         )
                                     )
 
-                                    # Commit per reaction
-                                    if not dry_run:
-                                        session.commit()
+            if all(r in conf_id_by_role for r in ("R1H", "R2H", "TS")):
+                # You can pass either the whole props dict or just mol_properties.
+                # If you adopted the robust helpers, both will work.
+                ts_props = (
+                    trip.records["TS"].mol_properties or trip.records["TS"].props or {}
+                )
+                map_triplet_key_atoms(
+                    session,
+                    conf_id_by_role=conf_id_by_role,
+                    idx2id_by_role=role_to_idx2id,
+                    ts_props=ts_props,
+                )
 
             # Commit per reaction
             if not dry_run:

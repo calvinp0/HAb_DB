@@ -7,6 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional, Dict, List, Tuple, Literal
+import json
+import ast
 
 from rdkit import Chem
 
@@ -49,6 +51,27 @@ def _extract_props(mol: Chem.Mol) -> Dict[str, str]:
         if k != "mol":
             out[str(k)] = str(v)
     return out
+
+
+def _jsonish_or_none(s: str | None):
+    """Parse a JSON-ish string into a Python object, or return None.
+
+    Treat '', 'unknown', 'null' (any case) as None.
+    First try json.loads; if that fails, fall back to ast.literal_eval for
+    legacy dict/list strings. Return None on any failure.
+    """
+    if s is None:
+        return None
+    t = s.strip()
+    if not t or t.lower() in {"unknown", "null"}:
+        return None
+    try:
+        return json.loads(t)
+    except Exception:
+        try:
+            return ast.literal_eval(t)
+        except Exception:
+            return None
 
 
 def _detect_role(
@@ -134,25 +157,19 @@ def iter_triplets(
             pos_in_triplet = i % 3
             role = _detect_role(props, pos_in_triplet, order_hint)
 
-        import json
-
         rxn_name = (
             props.get("reaction") or props.get("REACTION") or ""
         ).strip() or None
+
         mp_raw = props.get("mol_properties") or props.get("MOL_PROPERTIES")
         em_raw = props.get("electro_map") or props.get("ELECTRO_MAP")
-        mp = None
-        em = None
-        if mp_raw:
-            try:
-                mp = json.loads(mp_raw)
-            except json.JSONDecodeError:
-                mp = None
-        if em_raw:
-            try:
-                em = json.loads(em_raw)
-            except json.JSONDecodeError:
-                em = None
+
+        mp = _jsonish_or_none(mp_raw)
+        em = _jsonish_or_none(em_raw)
+
+        # if you want to guarantee dicts instead of None:
+        mp = mp if isinstance(mp, dict) else {}
+        em = em if isinstance(em, dict) else {}
         if rxn_name:
             if triplet_reaction_name is None:
                 triplet_reaction_name = rxn_name

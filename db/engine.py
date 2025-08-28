@@ -67,6 +67,12 @@ def get_engine(echo: bool = False) -> Engine:
             if SEARCH_PATH:
                 cur.execute(f"SET search_path TO {SEARCH_PATH}")
 
+    @event.listens_for(_engine, "connect")
+    def set_utf8(dbapi_conn, conn_record):
+        cur = dbapi_conn.cursor()
+        cur.execute("SET client_encoding TO 'UTF8'")
+        cur.close()
+
     return _engine
 
 

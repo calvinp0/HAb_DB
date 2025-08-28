@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import traceback
 import os
 from pathlib import Path
 import time
@@ -85,6 +86,14 @@ def main():
         help="Abort on first file error (default: best-effort)",
     )
 
+    ap.add_argument(
+        "--no-skip-if-loaded",
+        dest="skip_if_loaded",
+        action="store_false",
+        help="Do not skip previously loaded reactions",
+    )
+    ap.set_defaults(skip_if_loaded=True)
+
     # Defaults: strict_roles=True, sanitize=True unless the flags are provided
     ap.set_defaults(strict_roles=True, sanitize=True)
 
@@ -110,6 +119,7 @@ def main():
 
     errors = 0
     durations = []
+    skipped = 0
     for i, sdf in enumerate(sdf_files, start=1):
         print(f"[{i}/{len(sdf_files)}] Loading: {sdf}")
         t0 = time.perf_counter()
@@ -124,21 +134,28 @@ def main():
                 sanitize=args.sanitize,
                 kinetics_csv=args.kinetics_csv,
                 reuse_batch=args.reuse_batch,
+                skip_if_loaded=args.skip_if_loaded,
                 dry_run=args.dry_run,
             )
             dt = time.perf_counter() - t0
             durations.append(dt)
             print(f"  ✓ Done in {dt:.2f}s")
         except Exception as e:
-            errors += 1
-            print(f"  !! Failed: {sdf}\n     {e}")
+            if "already loaded; skipping." in str(e).lower():  # optional, if you raise
+                skipped += 1
+            else:
+                errors += 1
+                print(f"  ✗ Error: {e}")
+                traceback.print_exc()
             if args.stop_on_error:
                 raise
 
     total = len(sdf_files)
     ok = total - errors
     total_time = sum(durations) or 1e-9
-    print(f"Done. Loaded {ok} ok, {errors} failed. Avg {ok/total_time:.2f} files/sec")
+    print(
+        f"Done. Loaded {ok} ok, {errors} failed. Avg {ok/total_time:.2f} files/sec (skipped: {skipped})"
+    )
 
 
 if __name__ == "__main__":

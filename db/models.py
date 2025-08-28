@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .mixins import TimeStampMixin
-from .types import AtomRole, FeatureFrame, KinDirection, Mol, MolRole
+from .sqltypes import AtomRole, FeatureFrame, KinDirection, Mol, MolRole
 
 
 class Base(DeclarativeBase):
@@ -104,6 +104,8 @@ class Conformer(TimeStampMixin, Base):
     )
     geometry_hash: Mapped[str] = mapped_column(String, index=True)
     well_label: Mapped[Optional[str]] = mapped_column(String)
+    well_rank: Mapped[Optional[int]] = mapped_column(Integer)
+    is_well_representative = mapped_column(Boolean, default=None)
     is_ts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # store a canonical RDKit mol (rdkit type column)
@@ -113,7 +115,7 @@ class Conformer(TimeStampMixin, Base):
         UniqueConstraint(
             "species_id", "geometry_hash", "lot_id", name="uq_conformer_geom"
         ),
-        Index("ix_conformer_well", "well_label"),
+        Index("ix_conformer_species_lot_rank", "species_id", "lot_id", "well_rank"),
     )
 
     species: Mapped["Species"] = relationship(back_populates="conformers")
@@ -146,6 +148,7 @@ class Conformer(TimeStampMixin, Base):
         cascade="all, delete-orphan",
     )
 
+
 class WellFeatures(TimeStampMixin, Base):
     __tablename__ = "well_features"
     conformer_id: Mapped[int] = mapped_column(
@@ -153,16 +156,69 @@ class WellFeatures(TimeStampMixin, Base):
     )
     # Lot is already on Structure; no need to repeat unless you want redundancy
     E_elec: Mapped[Optional[float]] = mapped_column(Float)
+    E_elec_units: Mapped[Optional[str]] = mapped_column(String)
     ZPE: Mapped[Optional[float]] = mapped_column(Float)
+    ZPE_units: Mapped[Optional[str]] = mapped_column(String)
     H298: Mapped[Optional[float]] = mapped_column(Float)
+    H298_units: Mapped[Optional[str]] = mapped_column(String)
     G298: Mapped[Optional[float]] = mapped_column(Float)
+    G298_units: Mapped[Optional[str]] = mapped_column(String)
+    S298: Mapped[Optional[float]] = mapped_column(Float)
+    S298_units: Mapped[Optional[str]] = mapped_column(String)
     meta: Mapped[Optional[dict]] = mapped_column(JSONB)
     conformer: Mapped[Conformer] = relationship(
         lambda: Conformer, back_populates="well_features"
     )
 
 
-class ConformerAtom(Base):
+class NASAPolynomial(TimeStampMixin, Base):
+    __tablename__ = "nasa_polynomial"
+
+    poly_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    form: Mapped[str] = mapped_column(String, default="NASA7")  # NASA7, NASA9, etc.
+
+    Tmin_K: Mapped[float] = mapped_column(Float, nullable=False)
+    Tmax_K: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # NASA coefficients (classic 7-term)
+    a1: Mapped[float] = mapped_column(Float, nullable=False)
+    a2: Mapped[float] = mapped_column(Float, nullable=False)
+    a3: Mapped[float] = mapped_column(Float, nullable=False)
+    a4: Mapped[float] = mapped_column(Float, nullable=False)
+    a5: Mapped[float] = mapped_column(Float, nullable=False)
+    a6: Mapped[float] = mapped_column(Float, nullable=False)
+    a7: Mapped[float] = mapped_column(Float, nullable=False)
+
+    fit_rmse: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "conformer_id", "Tmin_K", "Tmax_K", "form", name="uq_poly_range"
+        ),
+    )
+
+
+class CPCurve(TimeStampMixin, Base):
+    __tablename__ = "cp_curve"
+    conformer_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
+    )
+    # Cp(T) data
+    T_K: Mapped[list[float]] = mapped_column(JSONB)
+    Cp_J_per_molK: Mapped[list[float]] = mapped_column(JSONB)
+    raw_units: Mapped[dict] = mapped_column(JSONB)
+    Cp0_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    CpInf_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ConformerAtom(TimeStampMixin, Base):
     __tablename__ = "conformer_atom"
     atom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     conformer_id: Mapped[int] = mapped_column(
@@ -192,7 +248,7 @@ class ConformerAtom(Base):
     )
 
 
-class AtomRoleMap(Base):
+class AtomRoleMap(TimeStampMixin, Base):
     __tablename__ = "atom_role_map"
     atom_id: Mapped[int] = mapped_column(
         ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), primary_key=True
@@ -201,7 +257,7 @@ class AtomRoleMap(Base):
     atom: Mapped["ConformerAtom"] = relationship(back_populates="roles")
 
 
-class AtomMapToTS(Base):
+class AtomMapToTS(TimeStampMixin, Base):
     __tablename__ = "atom_map_to_ts"
     ts_conformer_id: Mapped[int] = mapped_column(
         ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
@@ -217,7 +273,7 @@ class AtomMapToTS(Base):
     )
 
 
-class GeomDistance(Base):
+class GeomDistance(TimeStampMixin, Base):
     __tablename__ = "geom_distance"
     geom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     conformer_id: Mapped[int] = mapped_column(
@@ -241,7 +297,7 @@ class GeomDistance(Base):
     conformer: Mapped["Conformer"] = relationship(back_populates="distances")
 
 
-class GeomAngle(Base):
+class GeomAngle(TimeStampMixin, Base):
     __tablename__ = "geom_angle"
     geom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     conformer_id: Mapped[int] = mapped_column(
@@ -268,7 +324,7 @@ class GeomAngle(Base):
     conformer: Mapped["Conformer"] = relationship(back_populates="angles")
 
 
-class GeomDihedral(Base):
+class GeomDihedral(TimeStampMixin, Base):
     __tablename__ = "geom_dihedral"
     geom_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     conformer_id: Mapped[int] = mapped_column(
@@ -298,7 +354,7 @@ class GeomDihedral(Base):
     conformer: Mapped["Conformer"] = relationship(back_populates="dihedrals")
 
 
-class TSFeatures(Base):
+class TSFeatures(TimeStampMixin, Base):
     __tablename__ = "ts_features"
     # One row per (TS conformer, LoT) —> allows energies at multiple LoTs
     conformer_id: Mapped[int] = mapped_column(
@@ -312,9 +368,6 @@ class TSFeatures(Base):
     imag_freq_cm1: Mapped[Optional[float]] = mapped_column(Float)
     irc_verified: Mapped[Optional[bool]] = mapped_column(Boolean)
     E_TS: Mapped[Optional[float]] = mapped_column(Float)
-    E_R1H: Mapped[Optional[float]] = mapped_column(Float)
-    E_R2H: Mapped[Optional[float]] = mapped_column(Float)
-    delta_E_dagger: Mapped[Optional[float]] = mapped_column(Float)
 
     conformer: Mapped["Conformer"] = relationship(back_populates="ts_features")
     lot: Mapped["LevelOfTheory"] = relationship()
