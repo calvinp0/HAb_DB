@@ -476,7 +476,7 @@ export default function ConformerPage() {
                 {data.energy_label && data.energy_value != null ? (
                   <InfoRow label={data.energy_label}>
                     <div className="flex items-baseline gap-2">
-                      <span className="text-base">
+                      <span className="font-mono tabular-nums text-right inline-block w-[18ch] text-base">
                         {Number(data.energy_value).toExponential()}
                       </span>
                       <span className="text-slate-500 text-sm">kJ/mol</span>
@@ -533,7 +533,7 @@ export default function ConformerPage() {
                     <tr key={k}>
                       <td className="pr-6 py-1 text-slate-600 w-24">{k}</td>
                       <td className="py-1">
-                        <span className="font-mono tabular-nums text-right inline-block min-w-[16ch]">
+                        <span className="font-mono tabular-nums text-right inline-block w-[18ch]">
                           {Number.isFinite((data as any)[k])
                             ? Number((data as any)[k]).toExponential(energyDecimals)
                             : "—"}

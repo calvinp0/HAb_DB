@@ -1,19 +1,21 @@
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+# system deps for psycopg2 and pg_isready
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq-dev postgresql-client && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY ../requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY . /app/
+# copy the whole repo so /app/api and /app/db are siblings
+COPY . /app
 
-EXPOSE 8000
+# entrypoint script
+COPY api/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Optional default if image run standalone; Compose `command` overrides this.
+CMD ["./entrypoint.sh"]

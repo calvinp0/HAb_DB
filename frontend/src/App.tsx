@@ -709,7 +709,7 @@ export default function App() {
 
             {/* Black action button with magnifier */}
             <Button
-              onClick={doSearch}
+              onClick={() => void doSearch()}
               disabled={searchLoading}
               className="w-full gap-2 rounded-xl bg-black hover:bg-neutral-900"
             >
