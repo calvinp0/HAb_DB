@@ -334,6 +334,7 @@ export default function ConformerPage() {
   const [labelHydrogens, setLabelHydrogens] = React.useState(false);
   const labelsTemporarilyDisabled = style === "line";
   const controlsDisabled = !showLabels || labelsTemporarilyDisabled;
+  const [energyDecimals, setEnergyDecimals] = React.useState<number>(6);
   const indexGutter = React.useMemo(() => {
     const n = (showZ ? prettyZ.count : prettySym.count) ?? 0;
     return n
@@ -473,13 +474,14 @@ export default function ConformerPage() {
               </CardHeader>
               <CardContent>
                 {data.energy_label && data.energy_value != null ? (
-                  <div className="flex items-baseline gap-2">
-                    <Badge variant="outline">{data.energy_label}</Badge>
-                    <div className="text-base">
-                      {Number(data.energy_value).toFixed(3)}
+                  <InfoRow label={data.energy_label}>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-base">
+                        {Number(data.energy_value).toExponential()}
+                      </span>
+                      <span className="text-slate-500 text-sm">kJ/mol</span>
                     </div>
-                    <span className="text-slate-500 text-sm">kJ/mol</span>
-                  </div>
+                  </InfoRow>
                 ) : (
                   <div className="text-sm text-slate-500">
                     No key energy available.
@@ -496,19 +498,47 @@ export default function ConformerPage() {
           className="mt-4 data-[state=inactive]:hidden"
         >
           <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Energies (kJ/mol)</CardTitle>
-              <CardDescription>
-                All reported values for this conformer
-              </CardDescription>
+            <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <CardTitle className="text-base">Energies (kJ/mol)</CardTitle>
+                <CardDescription>
+                  All reported values for this conformer
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">Precision</span>
+                <Select
+                  value={String(energyDecimals)}
+                  onValueChange={(v) => setEnergyDecimals(Number(v))}
+                >
+                  <SelectTrigger className="h-8 w-28">
+                    <SelectValue placeholder="Decimals" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="2">2 decimals</SelectItem>
+                    <SelectItem value="3">3 decimals</SelectItem>
+                    <SelectItem value="4">4 decimals</SelectItem>
+                    <SelectItem value="5">5 decimals</SelectItem>
+                    <SelectItem value="6">6 decimals</SelectItem>
+                    <SelectItem value="7">7 decimals</SelectItem>
+                    <SelectItem value="8">8 decimals</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </CardHeader>
             <CardContent className="overflow-x-auto">
               <table className="text-sm">
                 <tbody>
                   {["G298", "H298", "E0", "E_elec", "ZPE", "E_TS"].map((k) => (
                     <tr key={k}>
-                      <td className="pr-6 py-1 text-slate-600">{k}</td>
-                      <td className="py-1">{num((data as any)[k])}</td>
+                      <td className="pr-6 py-1 text-slate-600 w-24">{k}</td>
+                      <td className="py-1">
+                        <span className="font-mono tabular-nums text-right inline-block min-w-[16ch]">
+                          {Number.isFinite((data as any)[k])
+                            ? Number((data as any)[k]).toExponential(energyDecimals)
+                            : "—"}
+                        </span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
