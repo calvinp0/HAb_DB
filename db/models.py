@@ -14,12 +14,22 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
+    Enum,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from .mixins import TimeStampMixin
-from .sqltypes import AtomRole, FeatureFrame, KinDirection, Mol, MolRole
+from .sqltypes import (
+    AtomRole,
+    FeatureFrame,
+    KinDirection,
+    Mol,
+    MolRole,
+    NameSource,
+    ExternalDB,
+)
 
 
 class Base(DeclarativeBase):
@@ -47,7 +57,7 @@ class Reaction(TimeStampMixin, Base):
     __tablename__ = "reactions"
     reaction_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     batch_id: Mapped[Optional[int]] = mapped_column(ForeignKey("ingest_batch.batch_id"))
-    reaction_name: Mapped[Optional[str]] = mapped_column(String, unique=True)
+    reaction_name: Mapped[Optional[str]] = mapped_column(String, unique=False)
     family: Mapped[str] = mapped_column(String, nullable=False)
     meta_data: Mapped[Optional[dict]] = mapped_column(JSONB)
 
@@ -75,6 +85,8 @@ class Species(TimeStampMixin, Base):
     spin_multiplicity: Mapped[Optional[int]] = mapped_column(Integer)
     mw: Mapped[Optional[float]] = mapped_column(Float)
     props: Mapped[Optional[dict]] = mapped_column(JSONB)
+    elements_json: Mapped[Optional[dict]] = mapped_column(JSONB)  # {'C': 4, 'H': 10}
+    heavy_atoms: Mapped[Optional[int]] = mapped_column(Integer)
 
     __table_args__ = (
         UniqueConstraint(
@@ -86,9 +98,53 @@ class Species(TimeStampMixin, Base):
     conformers: Mapped[List["Conformer"]] = relationship(
         back_populates="species", cascade="all, delete-orphan"
     )
+    names: Mapped[List["SpeciesName"]] = relationship(
+        lambda: SpeciesName, back_populates="species", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
-        return f"<Species(species_id={self.species_id}, inchi={self.inchi}, smiles={self.smiles})>"
+        return f"<Species(species_id={self.species_id}, inchikey={self.inchikey}, smiles={self.smiles})>"
+
+
+class SpeciesName(TimeStampMixin, Base):
+    __tablename__ = "species_name"
+    name_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    species_id: Mapped[int] = mapped_column(
+        ForeignKey("species.species_id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="synonym")
+    lang: Mapped[Optional[str]] = mapped_column(String, default="en")
+    source: Mapped[NameSource] = mapped_column(Enum(NameSource), nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    curated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    meta_data: Mapped[Optional[dict]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        UniqueConstraint("species_id", "name", name="uq_species_name"),
+        Index("ix_species_name_trgm", "name"),
+    )
+    source_priority: Mapped[Optional[int]] = mapped_column(
+        Integer, default=50, nullable=False
+    )
+    species: Mapped["Species"] = relationship(back_populates="names")
+
+
+class ExternalIdentifier(TimeStampMixin, Base):
+    __tablename__ = "external_identifier"
+    ext_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    species_id: Mapped[int] = mapped_column(
+        ForeignKey("species.species_id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    db: Mapped[ExternalDB] = mapped_column(Enum(ExternalDB), nullable=False)
+    identifier: Mapped[str] = mapped_column(String, nullable=False)  # e.g., PubChem CID
+    meta_data: Mapped[Optional[dict]] = mapped_column(JSONB)
+
+    __table_args__ = (
+        UniqueConstraint("species_id", "db", name="uq_species_db_once"),
+        Index("ix_extid_db_identifier", "db", "identifier"),
+    )
 
 
 class Conformer(TimeStampMixin, Base):
@@ -102,10 +158,12 @@ class Conformer(TimeStampMixin, Base):
         index=True,
         nullable=False,
     )
-    geometry_hash: Mapped[str] = mapped_column(String, index=True)
+    geometry_hash: Mapped[str] = mapped_column(String, index=True, nullable=False)
     well_label: Mapped[Optional[str]] = mapped_column(String)
     well_rank: Mapped[Optional[int]] = mapped_column(Integer)
-    is_well_representative = mapped_column(Boolean, default=None)
+    is_well_representative: Mapped[Optional[bool]] = mapped_column(
+        Boolean, default=None
+    )
     is_ts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # store a canonical RDKit mol (rdkit type column)
@@ -147,6 +205,18 @@ class Conformer(TimeStampMixin, Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    Index(
+        "uq_rep_per_species_lot_well",
+        "species_id",
+        "lot_id",
+        "well_label",
+        unique=True,
+        postgresql_where=text("is_well_representative IS TRUE"),
+    )
+    CheckConstraint(
+        "(is_ts = FALSE) OR (well_label IS NULL AND well_rank IS NULL AND is_well_representative IS NULL)",
+        name="ck_ts_not_a_well",
+    )
 
 
 class WellFeatures(TimeStampMixin, Base):
@@ -165,6 +235,12 @@ class WellFeatures(TimeStampMixin, Base):
     G298_units: Mapped[Optional[str]] = mapped_column(String)
     S298: Mapped[Optional[float]] = mapped_column(Float)
     S298_units: Mapped[Optional[str]] = mapped_column(String)
+
+    G298_source: Mapped[Optional[str]] = mapped_column(String)  # 'user' or 'backend'
+    G_calc_T_K: Mapped[Optional[float]] = mapped_column(
+        Float
+    )  # e.g., 298.15 when backend sets it
+
     meta: Mapped[Optional[dict]] = mapped_column(JSONB)
     conformer: Mapped[Conformer] = relationship(
         lambda: Conformer, back_populates="well_features"

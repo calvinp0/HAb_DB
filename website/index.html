@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Species Search (name / InChIKey / SMILES)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 24px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      input[type="text"] {
+        flex: 1;
+        padding: 8px;
+      }
+      button {
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin-top: 12px;
+      }
+      th,
+      td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: left;
+      }
+      th {
+        background: #f5f5f5;
+      }
+      .muted {
+        color: #666;
+      }
+      .error {
+        color: #b00020;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: #eee;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Search Species</h1>
+    <div class="row">
+      <input
+        id="q"
+        type="text"
+        placeholder="Type a name, InChIKey, or SMILES (e.g., CC)"
+      />
+      <button id="searchBtn">Search</button>
+      <span id="status" class="muted"></span>
+    </div>
+
+    <div class="row">
+      <label
+        >Limit
+        <input
+          id="limit"
+          type="number"
+          value="25"
+          min="1"
+          max="200"
+          style="width: 80px"
+      /></label>
+      <label
+        >Offset
+        <input id="offset" type="number" value="0" min="0" style="width: 80px"
+      /></label>
+      <button id="prevBtn">Prev</button>
+      <button id="nextBtn">Next</button>
+    </div>
+
+    <div id="results"></div>
+    <hr />
+    <h2 id="confTitle" class="muted">Conformers</h2>
+    <div class="row">
+      <label
+        ><input type="checkbox" id="repOnly" checked /> Representative
+        only</label
+      >
+      <label><input type="checkbox" id="nonTSOnly" /> Non-TS only</label>
+      <label
+        >LoT ID <input id="lotId" type="number" style="width: 100px"
+      /></label>
+      <label
+        >Well rank
+        <input id="wellRank" type="number" min="1" style="width: 100px"
+      /></label>
+      <button id="reloadConf">Reload conformers</button>
+    </div>
+    <div id="conformers"></div>
+
+    <div class="row">
+      <strong>Show energies:</strong>
+      <label
+        ><input type="checkbox" class="energyToggle" data-k="G298" checked />
+        G298</label
+      >
+      <label
+        ><input type="checkbox" class="energyToggle" data-k="H298" />
+        H298</label
+      >
+      <label
+        ><input type="checkbox" class="energyToggle" data-k="E0" /> E₀
+        (E_elec+ZPE)</label
+      >
+      <label
+        ><input type="checkbox" class="energyToggle" data-k="E_elec" />
+        E_elec</label
+      >
+      <label
+        ><input type="checkbox" class="energyToggle" data-k="ZPE" /> ZPE</label
+      >
+      <label
+        ><input type="checkbox" class="energyToggle" data-k="E_TS" />
+        E_TS</label
+      >
+    </div>
+
+    <script>
+      const API = location.origin + "/api/";
+      let lastQuery = "";
+      let lastSpeciesId = null;
+
+      const $ = (sel) => document.querySelector(sel);
+      const statusEl = $("#status");
+      const qEl = $("#q");
+      const limitEl = $("#limit");
+      const offsetEl = $("#offset");
+      const resultsEl = $("#results");
+      const confTitleEl = $("#confTitle");
+      const conformersEl = $("#conformers");
+
+      $("#searchBtn").addEventListener("click", () => doSearch());
+      qEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doSearch();
+      });
+      $("#prevBtn").addEventListener("click", () => {
+        const off = Math.max(0, Number(offsetEl.value) - Number(limitEl.value));
+        offsetEl.value = String(off);
+        doSearch();
+      });
+      $("#nextBtn").addEventListener("click", () => {
+        offsetEl.value = String(Number(offsetEl.value) + Number(limitEl.value));
+        doSearch();
+      });
+      $("#reloadConf").addEventListener("click", () => {
+        if (lastSpeciesId != null) loadConformers(lastSpeciesId);
+      });
+
+      async function doSearch() {
+        const q = qEl.value.trim();
+        lastQuery = q;
+        const limit = Number(limitEl.value);
+        const offset = Number(offsetEl.value);
+        if (!q) {
+          resultsEl.innerHTML = "";
+          conformersEl.innerHTML = "";
+          return;
+        }
+
+        setStatus("Searching…");
+        try {
+          const url = new URL("species/search", API);
+          url.searchParams.set("q", q);
+          url.searchParams.set("limit", String(limit));
+          url.searchParams.set("offset", String(offset));
+
+          const res = await fetch(url);
+          const body = await maybeJSON(res);
+          if (!res.ok) throw new Error(body?.detail || res.statusText);
+
+          renderSpecies(body);
+          setStatus(`${body.length} result(s)`);
+        } catch (err) {
+          resultsEl.innerHTML = "";
+          conformersEl.innerHTML = "";
+          setError(err.message || String(err));
+        }
+      }
+
+      function renderSpecies(items) {
+        if (!items || items.length === 0) {
+          resultsEl.innerHTML = '<p class="muted">No results.</p>';
+          return;
+        }
+        const rows = items
+          .map(
+            (sp) => `
+    <tr>
+      <td>${sp.species_id}</td>
+      <td>${sp.smiles ?? '<span class="muted">—</span>'}</td>
+      <td>${sp.inchikey ?? '<span class="muted">—</span>'}</td>
+      <td>${sp.charge ?? 0}</td>
+      <td>${sp.spin_multiplicity ?? 1}</td>
+      <td>${sp.mw?.toFixed?.(3) ?? '<span class="muted">—</span>'}</td>
+      <td><button data-id="${sp.species_id}" class="viewBtn">View conformers</button></td>
+    </tr>
+  `,
+          )
+          .join("");
+        resultsEl.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>ID</th><th>SMILES</th><th>InChIKey</th>
+        <th>Charge</th><th>Spin</th><th>MW</th><th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+        resultsEl.querySelectorAll(".viewBtn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            lastSpeciesId = Number(btn.dataset.id);
+            confTitleEl.textContent = `Conformers for species ${lastSpeciesId}`;
+            loadConformers(lastSpeciesId);
+          });
+        });
+      }
+
+      async function loadConformers(speciesId) {
+        setStatus("Loading conformers…");
+        try {
+          const url = new URL(`species/${speciesId}/conformers`, API);
+          const repOnly = $("#repOnly").checked;
+          const nonTSOnly = $("#nonTSOnly").checked;
+          const lotId = $("#lotId").value.trim();
+          const wellRank = $("#wellRank").value.trim();
+
+          if (repOnly) url.searchParams.set("representative_only", "true");
+          if (nonTSOnly) url.searchParams.set("is_ts", "false");
+          if (lotId) url.searchParams.set("lot_id", lotId);
+          if (wellRank) url.searchParams.set("well_rank", wellRank);
+
+          // you can also add limit/offset params here if needed
+
+          const res = await fetch(url);
+          const body = await maybeJSON(res);
+          if (!res.ok) throw new Error(body?.detail || res.statusText);
+          renderConformers(body);
+          setStatus(`Loaded ${body.length} conformers`);
+        } catch (err) {
+          conformersEl.innerHTML = "";
+          setError(err.message || String(err));
+        }
+      }
+
+      function selectedEnergies() {
+        return [...document.querySelectorAll(".energyToggle:checked")].map(
+          (cb) => cb.dataset.k,
+        );
+      }
+      function fmt(x, digits = 3) {
+        return (x ?? null) === null
+          ? '<span class="muted">—</span>'
+          : Number(x).toFixed(digits);
+      }
+
+      // re-render conformers whenever toggles change
+      document.addEventListener("change", (e) => {
+        if (
+          e.target.classList.contains("energyToggle") &&
+          lastSpeciesId != null
+        ) {
+          loadConformers(lastSpeciesId);
+        }
+      });
+
+      function renderConformers(items) {
+        if (!items || items.length === 0) {
+          conformersEl.innerHTML = '<p class="muted">No conformers.</p>';
+          return;
+        }
+        const energies = selectedEnergies(); // e.g., ["G298","E0"]
+        // headers
+        const energyHeads = energies
+          .map((k) => `<th>${k} (kJ/mol)</th>`)
+          .join("");
+        // rows
+        const rows = items
+          .map((c) => {
+            const lotStr =
+              c.lot && c.lot.lot_string
+                ? c.lot.lot_string
+                : '<span class="muted">—</span>';
+            const energyCells = energies
+              .map((k) => `<td>${fmt(c[k])}</td>`)
+              .join("");
+            return `
+      <tr>
+        <td>${lotStr}</td>
+        ${energyCells}
+        <td>${c.is_ts ? '<span class="pill">TS</span>' : ""}</td>
+        <td>${c.well_label ?? '<span class="muted">—</span>'}</td>
+        <td>${c.well_rank ?? '<span class="muted">—</span>'}</td>
+        <td>${c.is_well_representative ? "✔" : "—"}</td>
+      </tr>`;
+          })
+          .join("");
+
+        conformersEl.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>LoT</th>
+        ${energyHeads}
+        <th>TS</th><th>Well</th><th>Rank</th><th>Rep</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+      }
+
+      async function maybeJSON(res) {
+        const text = await res.text();
+        try {
+          return text ? JSON.parse(text) : null;
+        } catch {
+          return { detail: text };
+        }
+      }
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+        statusEl.className = "muted";
+      }
+      function setError(msg) {
+        statusEl.textContent = msg;
+        statusEl.className = "error";
+      }
+    </script>
+  </body>
+</html>

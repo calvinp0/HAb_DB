@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from db.engine import session_scope, exec_sql
@@ -38,6 +38,8 @@ from ingest.utils import (
     _extract_cp_curve,
     _to_J_per_molK,
     map_triplet_key_atoms,
+    _H_to_kJmol,
+    _S_to_kJmolK,
 )
 
 ROLE_MAP = {"r1h": "R1H", "r2h": "R2H", "ts": "TS"}
@@ -201,21 +203,6 @@ def _direction_and_model(label: str):
     return direction, model
 
 
-def _to_kj(value: Optional[float], units: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-    u = (units or "").strip().lower()
-    if not u or u in {"kj/mol", "kjmol", "kj_per_mol", "kjmol^-1", "kjmol-1"}:
-        return value
-    if u in {"hartree", "eh"}:
-        return value * HARTREE_TO_KJ_MOL
-    if u in {"cal", "cal/mol", "cal_per_mol", "calmol^-1", "calmol-1"}:
-        return value * CAL_TO_KJ_MOL
-    if u in {"j/mol", "j_per_mol", "jmol^-1", "jmol-1"}:
-        return value * J_TO_KJ_MOL
-    return None
-
-
 def _first(props: dict, *keys):
     for k in keys:
         if k in props and str(props[k]).strip() != "":
@@ -249,14 +236,12 @@ def _extract_ts_fields(props: dict) -> dict:
 
 
 def _extract_well_fields(props: dict) -> dict:
-    """Grab common keys for well energietics; normalize to kJ/mole where appropriate"""
-
-    # E0 / electronic energy (store as E_elec)
+    """Normalize well energetics to canonical units; compute G298 if missing."""
+    # Source candidates
     E0_kj = _first(props, "E0_kJmol", "E0_kJ/mol", "E0_kJ_per_mol")
     E0_val = _first(props, "E0_value", "E_value", "E_elec", "E")
     E0_units = _first(props, "E0_units", "E_units", "E_elec_units")
 
-    # Enthalpy & Gibbs at 298 K
     H298_kj = _first(props, "H298_kJmol", "H298_kJ/mol")
     H298_val = _first(props, "H298_value", "enthalpy_298", "H_298")
     H298_units = _first(props, "H298_units", "enthalpy_units")
@@ -265,58 +250,76 @@ def _extract_well_fields(props: dict) -> dict:
     G298_val = _first(props, "G298_value", "gibbs_298", "G_298")
     G298_units = _first(props, "G298_units", "gibbs_units")
 
-    # ZPE (optional)
     ZPE_kj = _first(props, "ZPE_kJmol", "ZPE_kJ/mol")
     ZPE_val = _first(props, "ZPE", "zero_point_energy", "zero_point_kJ_mol")
     ZPE_units = _first(props, "ZPE_units", "zpe_units")
 
-    # Get S298
-    S298_kj = _first(props, "S298_kJmol", "S298_kJ/mol")
+    S298_kj = _first(props, "S298_kJmol", "S298_kJ/mol")  # rare
     S298_val = _first(props, "S298", "entropy_298", "S_298", "S298_value")
     S298_units = _first(props, "S298_units", "entropy_units")
 
-    # parse to floats
+    # Parse numbers
     E0_kj_f = _parse_float_or_none(E0_kj)
     H298_kj_f = _parse_float_or_none(H298_kj)
     G298_kj_f = _parse_float_or_none(G298_kj)
-    S298_kj_f = _parse_float_or_none(S298_kj)
     ZPE_kj_f = _parse_float_or_none(ZPE_kj)
-
-    E0_val_f = _to_kj(_parse_float_or_none(E0_val), E0_units)
-    H298_val_f = _to_kj(_parse_float_or_none(H298_val), H298_units)
-    S298_val_f = _to_J_per_molK(_parse_float_or_none(S298_val), S298_units)
     S298_kj_f = _parse_float_or_none(S298_kj)
-    G298_val_f = _to_kj(_parse_float_or_none(G298_val), G298_units)
-    ZPE_val_f = _to_kj(_parse_float_or_none(ZPE_val), ZPE_units)
 
+    E0_val_f = _H_to_kJmol(_parse_float_or_none(E0_val), E0_units)
+    H298_val_f = _H_to_kJmol(_parse_float_or_none(H298_val), H298_units)
+    G298_val_f = _H_to_kJmol(_parse_float_or_none(G298_val), G298_units)
+
+    # Entropy: prefer explicit, convert to kJ/mol/K
+    S298_val_f = _parse_float_or_none(S298_val)
+    S298_from_val = _S_to_kJmolK(S298_val_f, S298_units)
+    S298 = S298_from_val if S298_from_val is not None else S298_kj_f  # already kJ/mol/K
+    S298_units_out = (
+        "kJ/mol/K" if S298 is not None else None
+    )  # canonical internal units
+
+    # Energies
     E_elec = E0_kj_f if E0_kj_f is not None else E0_val_f
-    E_elec_units = "kJ/mol" if E_elec is not None else None
     H298 = H298_kj_f if H298_kj_f is not None else H298_val_f
-    H298_units = "kJ/mol" if H298 is not None else None
-    S298 = S298_val_f if S298_val_f is not None else S298_kj_f
-    S298_units_out = "J/(mol*K)" if S298 is not None else None
-    G298 = G298_kj_f if G298_kj_f is not None else G298_val_f
-    G298_units = "kJ/mol" if G298 is not None else None
-    ZPE = ZPE_kj_f if ZPE_kj_f is not None else ZPE_val_f
-    ZPE_units = "kJ/mol" if ZPE is not None else None
+    ZPE = (
+        ZPE_kj_f
+        if ZPE_kj_f is not None
+        else _H_to_kJmol(_parse_float_or_none(ZPE_val), ZPE_units)
+    )
+
+    # G298: prefer provided (normalized), else compute from H & S at 298.15 K
+    G_from_source = G298_kj_f if G298_kj_f is not None else G298_val_f
+    G_calc = None
+    if G_from_source is None and H298 is not None and S298 is not None:
+        G_calc = H298 - 298.15 * S298  # (kJ/mol) - K*(kJ/mol/K)
+    G298 = G_from_source if G_from_source is not None else G_calc
+    G298_units_out = "kJ/mol" if G298 is not None else None
+
+    meta = {
+        "E0_units_raw": E0_units,
+        "H298_units_raw": H298_units,
+        "G298_units_raw": G298_units,
+        "ZPE_units_raw": ZPE_units,
+        "S298_units_raw": S298_units,
+    }
+    # provenance
+    if G_from_source is not None:
+        meta["G298_source"] = "user"
+    elif G_calc is not None:
+        meta["G298_source"] = "backend"
+        meta["G_calc_T_K"] = 298.15
 
     return {
         "E_elec": E_elec,
-        "E_elec_units": E_elec_units,
+        "E_elec_units": "kJ/mol" if E_elec is not None else None,
         "ZPE": ZPE,
-        "ZPE_units": ZPE_units,
+        "ZPE_units": "kJ/mol" if ZPE is not None else None,
         "H298": H298,
-        "H298_units": H298_units,
+        "H298_units": "kJ/mol" if H298 is not None else None,
         "S298": S298,
-        "S298_units": S298_units_out,
+        "S298_units": "kJ/mol/K" if S298 is not None else None,
         "G298": G298,
-        "G298_units": G298_units,
-        "meta": {
-            "E0_units": E0_units,
-            "H298_units": H298_units,
-            "G298_units": G298_units,
-            "ZPE_units": ZPE_units,
-        },
+        "G298_units": "kJ/mol" if G298 is not None else None,
+        "meta": meta,
     }
 
 
@@ -518,7 +521,7 @@ def upsert_species(
 
 
 def upsert_conformer(
-    session,
+    session: Session,
     species_id: int,
     lot_id: int,
     mol_rdkit_smiles: str,
@@ -527,28 +530,54 @@ def upsert_conformer(
     is_ts: bool,
 ):
     tbl = Conformer.__table__
-    ins = pg_insert(tbl).values(
-        species_id=species_id,
-        lot_id=lot_id,
-        geometry_hash=geometry_hash,
-        well_label=well_label,
-        is_ts=is_ts,
-        mol=func.mol_from_smiles(mol_rdkit_smiles),
-    )
 
-    stmt = ins.on_conflict_do_update(
-        # must match a unique/PK constraint on the table:
-        index_elements=[tbl.c.species_id, tbl.c.lot_id, tbl.c.geometry_hash],
-        set_={
-            # take the incoming values on conflict
-            "well_label": ins.excluded.well_label,
-            "is_ts": ins.excluded.is_ts,
-            # re-generate mol from the new SMILES
-            "mol": func.mol_from_smiles(mol_rdkit_smiles),
-            "updated_at": func.now(),
-        },
-    ).returning(tbl.c.conformer_id)
-    return session.scalar(stmt)
+    # 1) Try insert; if conflict, do nothing.
+    ins = (
+        pg_insert(tbl)
+        .values(
+            species_id=species_id,
+            lot_id=lot_id,
+            geometry_hash=geometry_hash,
+            well_label=well_label,
+            is_ts=is_ts,
+            mol=func.mol_from_smiles(mol_rdkit_smiles),
+        )
+        .on_conflict_do_nothing(constraint="uq_conformer_geom")
+        .returning(tbl.c.conformer_id)
+    )
+    res = session.execute(ins).first()
+
+    if res:
+        # Fresh insert
+        return res[0], False  # (conformer_id, merged=False)
+
+    # 2) Conflict path → update the existing row and fetch its id
+    upd = (
+        update(tbl)
+        .where(
+            tbl.c.species_id == species_id,
+            tbl.c.geometry_hash == geometry_hash,
+            tbl.c.lot_id == lot_id,
+        )
+        .values(
+            well_label=well_label,
+            is_ts=is_ts,
+            mol=func.mol_from_smiles(mol_rdkit_smiles),
+            updated_at=func.now(),
+        )
+        .returning(tbl.c.conformer_id)
+    )
+    res2 = session.execute(upd).first()
+    if not res2:
+        # extremely unlikely; safety fallback to select
+        sel = select(tbl.c.conformer_id).where(
+            tbl.c.species_id == species_id,
+            tbl.c.geometry_hash == geometry_hash,
+            tbl.c.lot_id == lot_id,
+        )
+        res2 = session.execute(sel).first()
+    return (res2[0] if res2 else None), True
+    return result.conformer_id, result.geometry_hash
 
 
 def upsert_ts_features(session, conformer_id: int, lot_id: int, fields: dict):
@@ -749,6 +778,7 @@ def load_all(
         "kinetics_rows": 0,
         "csv_atoms_matched": 0,
         "csv_atoms_missing": 0,
+        "merged_conformers": [],
     }
     csv_index = _index_csv(csv_path) if csv_path else {}
     kin_index = _index_kinetics_csv_rmg(kinetics_csv) if kinetics_csv else {}
@@ -776,6 +806,7 @@ def load_all(
         for trip in iter_triplets(
             sdf_path, strict_roles=strict_roles, sanitize=sanitize
         ):
+            stats["dropped_conformers"] = []
             rxn_name = trip.reaction_name or "unnamed_rxn"
             if (
                 skip_if_loaded
@@ -839,7 +870,7 @@ def load_all(
                         mw=mw,
                         props=rec.props,
                     )
-                    conformer_id = upsert_conformer(
+                    conformer_id, merged = upsert_conformer(
                         session,
                         species_id=species_id,
                         lot_id=lot_id,
@@ -848,6 +879,18 @@ def load_all(
                         well_label=rec.props.get("well_label"),
                         is_ts=is_ts,
                     )
+
+                    if merged:
+                        stats["merged_conformers"].append(
+                            {
+                                "reaction": rxn_name,
+                                "species_id": species_id,
+                                "lot_id": lot_id,
+                                "geometry_hash": ghash,
+                                "role": rec.role,
+                                "is_ts": is_ts,
+                            }
+                        )
                     atoms_exist = (
                         session.scalar(
                             select(func.count())
@@ -1101,6 +1144,14 @@ def load_all(
             f"csv_matched={stats['csv_atoms_matched']} csv_missing={stats['csv_atoms_missing']}"
         )
     else:
+        if stats["merged_conformers"]:
+            print("\n⚠ Conformers merged (duplicate geometry within species/LoT):")
+            for d in stats["merged_conformers"]:
+                print(
+                    f" - {d['reaction']}  role={d['role']}  species={d['species_id']}  lot={d['lot_id']}  hash={d['geometry_hash']}"
+                )
+        else:
+            print("\nNo conformers were merged.")
         print(f"Loaded: SDF={sdf_path} ; CSV={'none' if not csv_path else csv_path}")
 
 

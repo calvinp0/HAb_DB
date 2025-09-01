@@ -4,6 +4,68 @@ from typing import Optional, List
 
 R_J_MOLK = 8.31446261815324
 CAL_TO_J_PER_MOLK = 4.184
+HARTREE_TO_KJ_MOL = 2625.49962
+CAL_TO_KJ_MOL = 4.184
+J_TO_KJ_MOL = 0.001
+
+
+# at top of file (near other helpers)
+def _norm_unit(u: Optional[str]) -> Optional[str]:
+    if not u:
+        return None
+    s = u.strip().lower()
+    s = s.replace(" ", "")
+    s = s.replace("\\", "/").replace("·", "*").replace("⋅", "*")
+    # J/(mol*K) → J/mol/K ; kcal/(mol*K) → kcal/mol/K ; etc.
+    s = s.replace("/(mol*k)", "/mol*k").replace("*", "/")
+    aliases = {
+        "j/(mol*k)": "j/mol/k",
+        "j/mol/k": "j/mol/k",
+        "jmol^-1k^-1": "j/mol/k",
+        "jmol-1k-1": "j/mol/k",
+        "kj/(mol*k)": "kj/mol/k",
+        "kj/mol/k": "kj/mol/k",
+        "cal/(mol*k)": "cal/mol/k",
+        "cal/mol/k": "cal/mol/k",
+        "kcal/(mol*k)": "kcal/mol/k",
+        "kcal/mol/k": "kcal/mol/k",
+        "kj/mol": "kj/mol",
+        "kcal/mol": "kcal/mol",
+        "j/mol": "j/mol",
+        "hartree": "hartree",
+        "eh": "hartree",
+    }
+    return aliases.get(s, s)
+
+
+def _H_to_kJmol(val: Optional[float], units: Optional[str]) -> Optional[float]:
+    if val is None:
+        return None
+    u = _norm_unit(units)
+    if u == "kj/mol":
+        return val
+    if u == "kcal/mol":
+        return val * CAL_TO_KJ_MOL
+    if u == "j/mol":
+        return val * J_TO_KJ_MOL
+    if u == "hartree":
+        return val * HARTREE_TO_KJ_MOL
+    return None
+
+
+def _S_to_kJmolK(val: Optional[float], units: Optional[str]) -> Optional[float]:
+    if val is None:
+        return None
+    u = _norm_unit(units)
+    if u == "kj/mol/k":
+        return val
+    if u == "j/mol/k":
+        return val / 1000.0
+    if u == "cal/mol/k":
+        return val * CAL_TO_KJ_MOL / 1000.0
+    if u == "kcal/mol/k":
+        return val * CAL_TO_KJ_MOL
+    return None
 
 
 def _as_list_of_floats(x) -> Optional[list[float]]:

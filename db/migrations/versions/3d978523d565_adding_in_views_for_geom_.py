@@ -81,8 +81,23 @@ def upgrade() -> None:
     """
     )
 
+    op.execute(
+        """
+    CREATE OR REPLACE VIEW v_NULL_energy AS
+    SELECT
+      conf.conformer_id,
+      r.reaction_name
+    FROM conformer conf
+    LEFT JOIN reaction_participant rp ON rp.conformer_id = conf.conformer_id
+    LEFT JOIN reactions r ON r.reaction_id = rp.reaction_id
+    LEFT JOIN well_features wf ON wf.conformer_id = conf.conformer_id
+    WHERE wf."E_elec" ISNULL
+    """
+    )
+
 
 def downgrade() -> None:
     op.execute("DROP VIEW IF EXISTS v_geom_dihedral;")
     op.execute("DROP VIEW IF EXISTS v_geom_angle;")
     op.execute("DROP VIEW IF EXISTS v_geom_distance;")
+    op.execute("DROP VIEW IF EXISTS v_NULL_energy;")

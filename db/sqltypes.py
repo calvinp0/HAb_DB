@@ -1,5 +1,7 @@
 from sqlalchemy import Enum
 from sqlalchemy.types import UserDefinedType
+import enum
+import unicodedata
 
 
 class Mol(UserDefinedType):
@@ -38,3 +40,19 @@ FeatureFrame = Enum(
 )
 
 KinDirection = Enum("forward", "reverse", name="kin_direction", create_constraint=True)
+
+
+class NameSource(str, enum.Enum):
+    pubchem = "pubchem"
+    rmg = "rmg"
+    opsin = "opsin"
+    user = "user"
+    cactus = "cactus"
+    other = "other"
+
+
+class ExternalDB(str, enum.Enum):
+    pubchem = "pubchem"
+    chemspider = "chemspider"
+    cas = "cas"
+    other = "other"
