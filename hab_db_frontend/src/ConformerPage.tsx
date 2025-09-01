@@ -138,12 +138,43 @@ const InfoRow: React.FC<{ label: string; children: React.ReactNode }> = ({
   </div>
 );
 
+function parseXYZAtoms(xyz?: string | null) {
+  if (!xyz) return [] as { idx: number; elem: string }[];
+  const lines = xyz.replace(/\r/g, "").trim().split("\n");
+  const maybeN = parseInt(lines[0]?.trim() ?? "", 10);
+  const hasHeader = Number.isFinite(maybeN) && lines.length >= maybeN + 2;
+  const coordLines = hasHeader ? lines.slice(2) : lines;
+
+  const atoms = [] as { idx: number; elem: string }[];
+  for (let i = 0; i < coordLines.length; i++) {
+    const parts = coordLines[i].trim().split(/\s+/);
+    const elem = parts[0];
+    const x = Number(parts[1]),
+      y = Number(parts[2]),
+      z = Number(parts[3]);
+    if (
+      elem &&
+      Number.isFinite(x) &&
+      Number.isFinite(y) &&
+      Number.isFinite(z)
+    ) {
+      atoms.push({ idx: i + 1, elem });
+    }
+  }
+  return atoms;
+}
+
 export default function ConformerPage() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = React.useState<Detail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [explicitH, setExplicitH] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
+  const [theme, setTheme] = React.useState<"jmol" | "gaussview">("jmol");
+  const atomList = React.useMemo(
+    () => parseXYZAtoms(data?.geom_xyz),
+    [data?.geom_xyz],
+  );
   const smilesDisplay = React.useMemo(() => {
     const noH = data?.smiles_no_h ?? null;
     const full = data?.smiles ?? null;
@@ -163,6 +194,20 @@ export default function ConformerPage() {
     "ballstick",
   );
   const [spin, setSpin] = React.useState(false);
+  const [showLabels, setShowLabels] = React.useState(true);
+  const [labelMode, setLabelMode] = React.useState<
+    "elem" | "index" | "elem+index"
+  >("elem+index");
+  const [labelHydrogens, setLabelHydrogens] = React.useState(false);
+  const labelsTemporarilyDisabled = style === "line";
+  const controlsDisabled = !showLabels || labelsTemporarilyDisabled;
+  const indexGutter = React.useMemo(() => {
+    const n = prettyXYZ.count ?? 0;
+    if (!n) return "";
+    return Array.from({ length: n }, (_, i) =>
+      String(i + 1).padStart(3, " "),
+    ).join("\n");
+  }, [prettyXYZ.count]);
   React.useEffect(() => {
     (async () => {
       try {
@@ -205,7 +250,10 @@ export default function ConformerPage() {
         </TabsList>
 
         {/* Overview: LoT + a compact energy snapshot */}
-        <TabsContent value="overview" className="mt-4 data-[state=inactive]:hidden">
+        <TabsContent
+          value="overview"
+          className="mt-4 data-[state=inactive]:hidden"
+        >
           <div className="grid md:grid-cols-2 gap-6">
             {/* Information */}
             <Card className="h-full">
@@ -321,7 +369,10 @@ export default function ConformerPage() {
         </TabsContent>
 
         {/* Full Energies tab (same table—kept separate so you can expand later) */}
-        <TabsContent value="energies" className="mt-4 data-[state=inactive]:hidden">
+        <TabsContent
+          value="energies"
+          className="mt-4 data-[state=inactive]:hidden"
+        >
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Energies (kJ/mol)</CardTitle>
@@ -345,7 +396,10 @@ export default function ConformerPage() {
         </TabsContent>
 
         {/* Spectra tab */}
-        <TabsContent value="spectra" className="mt-4 data-[state=inactive]:hidden">
+        <TabsContent
+          value="spectra"
+          className="mt-4 data-[state=inactive]:hidden"
+        >
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Spectra</CardTitle>
@@ -371,7 +425,10 @@ export default function ConformerPage() {
         </TabsContent>
 
         {/* Geometry tab */}
-        <TabsContent value="geometry" className="mt-4 data-[state=inactive]:hidden">
+        <TabsContent
+          value="geometry"
+          className="mt-4 data-[state=inactive]:hidden"
+        >
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
@@ -412,9 +469,17 @@ export default function ConformerPage() {
             </CardHeader>
             <CardContent>
               {prettyXYZ.text ? (
-                <pre className="text-xs whitespace-pre leading-5 font-mono">
-                  {prettyXYZ.text}
-                </pre>
+                <div className="flex gap-4">
+                  {/* Left: non-selectable index gutter */}
+                  <pre className="text-xs whitespace-pre leading-5 font-mono text-slate-400 select-none">
+                    {indexGutter}
+                  </pre>
+
+                  {/* Right: the actual copy-safe XYZ block */}
+                  <pre className="text-xs whitespace-pre leading-5 font-mono flex-1">
+                    {prettyXYZ.text}
+                  </pre>
+                </div>
               ) : (
                 <div className="text-sm text-slate-500">
                   No geometry available.
@@ -425,7 +490,11 @@ export default function ConformerPage() {
         </TabsContent>
 
         {/** 3D */}
-        <TabsContent value="viewer3d" className="mt-4 data-[state=inactive]:hidden" forceMount>
+        <TabsContent
+          value="viewer3d"
+          className="mt-4 data-[state=inactive]:hidden"
+          forceMount
+        >
           <Card>
             <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
@@ -434,6 +503,20 @@ export default function ConformerPage() {
               </div>
 
               {/* simple controls */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">Theme</span>
+                <Select value={theme} onValueChange={(v) => setTheme(v as any)}>
+                  <SelectTrigger className="h-8 w-32">
+                    <SelectValue placeholder="Theme" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="jmol">Jmol (default)</SelectItem>
+                    <SelectItem value="gaussview">GaussView</SelectItem>
+                    <SelectItem value="chemcraft">Chemcraft</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2 text-xs text-slate-500">
                   <span>Spin</span>
@@ -458,6 +541,54 @@ export default function ConformerPage() {
                     </SelectContent>
                   </Select>
                 </div>
+
+                {/* Labels toggle is always visible */}
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <span>Labels</span>
+                  <Switch
+                    checked={showLabels}
+                    onCheckedChange={setShowLabels}
+                  />
+                </div>
+
+                {/* Keep these visible; disable when off or in line style */}
+                <div
+                  className={`flex items-center gap-2 ${controlsDisabled ? "opacity-50" : ""}`}
+                  title={
+                    labelsTemporarilyDisabled
+                      ? "Labels are hidden in Line style"
+                      : undefined
+                  }
+                >
+                  <span className="text-xs text-slate-500">Label</span>
+                  <Select
+                    value={labelMode}
+                    onValueChange={(v) => setLabelMode(v as any)}
+                  >
+                    <SelectTrigger
+                      className="h-8 w-32"
+                      disabled={controlsDisabled}
+                    >
+                      <SelectValue placeholder="Label" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="elem">Atom</SelectItem>
+                      <SelectItem value="index">Index</SelectItem>
+                      <SelectItem value="elem+index">Atom+Index</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div
+                  className={`flex items-center gap-2 text-xs ${controlsDisabled ? "opacity-50 text-slate-400" : "text-slate-500"}`}
+                >
+                  <span>H labels</span>
+                  <Switch
+                    checked={labelHydrogens}
+                    onCheckedChange={setLabelHydrogens}
+                    disabled={controlsDisabled}
+                  />
+                </div>
               </div>
             </CardHeader>
 
@@ -468,6 +599,9 @@ export default function ConformerPage() {
                 spin={spin}
                 height={440}
                 active={tab === "viewer3d"} // <— important
+                theme={theme}
+                labelMode={!showLabels || style === "line" ? "none" : labelMode}
+                labelHydrogens={labelHydrogens}
               />
             </CardContent>
           </Card>
