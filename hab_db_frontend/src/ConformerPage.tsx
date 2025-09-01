@@ -80,25 +80,145 @@ const formatMethod = (s?: string | null) => {
   return m.replace(/[a-z]/g, (c) => c.toUpperCase());
 };
 
-// (Dot defined below with shared styling)
+/** Atomic Symbol to Atomic Number */
+const Z_FROM_SYMBOL: Record<string, number> = {
+  H: 1,
+  He: 2,
+  Li: 3,
+  Be: 4,
+  B: 5,
+  C: 6,
+  N: 7,
+  O: 8,
+  F: 9,
+  Ne: 10,
+  Na: 11,
+  Mg: 12,
+  Al: 13,
+  Si: 14,
+  P: 15,
+  S: 16,
+  Cl: 17,
+  Ar: 18,
+  K: 19,
+  Ca: 20,
+  Sc: 21,
+  Ti: 22,
+  V: 23,
+  Cr: 24,
+  Mn: 25,
+  Fe: 26,
+  Co: 27,
+  Ni: 28,
+  Cu: 29,
+  Zn: 30,
+  Ga: 31,
+  Ge: 32,
+  As: 33,
+  Se: 34,
+  Br: 35,
+  Kr: 36,
+  Rb: 37,
+  Sr: 38,
+  Y: 39,
+  Zr: 40,
+  Nb: 41,
+  Mo: 42,
+  Tc: 43,
+  Ru: 44,
+  Rh: 45,
+  Pd: 46,
+  Ag: 47,
+  Cd: 48,
+  In: 49,
+  Sn: 50,
+  Sb: 51,
+  Te: 52,
+  I: 53,
+  Xe: 54,
+  Cs: 55,
+  Ba: 56,
+  La: 57,
+  Ce: 58,
+  Pr: 59,
+  Nd: 60,
+  Pm: 61,
+  Sm: 62,
+  Eu: 63,
+  Gd: 64,
+  Tb: 65,
+  Dy: 66,
+  Ho: 67,
+  Er: 68,
+  Tm: 69,
+  Yb: 70,
+  Lu: 71,
+  Hf: 72,
+  Ta: 73,
+  W: 74,
+  Re: 75,
+  Os: 76,
+  Ir: 77,
+  Pt: 78,
+  Au: 79,
+  Hg: 80,
+  Tl: 81,
+  Pb: 82,
+  Bi: 83,
+  Po: 84,
+  At: 85,
+  Rn: 86,
+  Fr: 87,
+  Ra: 88,
+  Ac: 89,
+  Th: 90,
+  Pa: 91,
+  U: 92,
+  Np: 93,
+  Pu: 94,
+  Am: 95,
+  Cm: 96,
+  Bk: 97,
+  Cf: 98,
+  Es: 99,
+  Fm: 100,
+  Md: 101,
+  No: 102,
+  Lr: 103,
+  Rf: 104,
+  Db: 105,
+  Sg: 106,
+  Bh: 107,
+  Hs: 108,
+  Mt: 109,
+  Ds: 110,
+  Rg: 111,
+  Cn: 112,
+  Nh: 113,
+  Fl: 114,
+  Mc: 115,
+  Lv: 116,
+  Ts: 117,
+  Og: 118,
+};
 
-const formatXYZ = (xyz: string, decimals = 6) => {
+const getZ = (sym: string) => Z_FROM_SYMBOL[sym] ?? 0;
+
+const formatXYZ = (xyz: string, decimals = 6, atomCol: "sym" | "z" = "sym") => {
   if (!xyz) return { text: "", hasHeader: false, count: 0 };
 
   const lines = xyz.replace(/\r/g, "").trim().split("\n");
-  // detect classic XYZ header: first line is an integer and we have at least N+2 lines
   const maybeN = parseInt(lines[0]?.trim() ?? "", 10);
   const hasHeader = Number.isFinite(maybeN) && lines.length >= maybeN + 2;
   const coordLines = hasHeader ? lines.slice(2) : lines;
 
-  // parse coordinates
   const entries = coordLines
     .map((ln) => {
-      const parts = ln.trim().split(/\s+/);
-      const sym = parts[0];
-      const x = Number(parts[1]);
-      const y = Number(parts[2]);
-      const z = Number(parts[3]);
+      const p = ln.trim().split(/\s+/);
+      const sym = p[0],
+        x = Number(p[1]),
+        y = Number(p[2]),
+        z = Number(p[3]);
       return sym &&
         Number.isFinite(x) &&
         Number.isFinite(y) &&
@@ -110,10 +230,15 @@ const formatXYZ = (xyz: string, decimals = 6) => {
 
   if (!entries.length) return { text: xyz, hasHeader: false, count: 0 };
 
-  // fixed columns: symbol (2), then three right-aligned fields (width 12 incl. sign)
+  // fixed width helpers
   const col = (n: number) => n.toFixed(decimals).padStart(12, " ");
+
+  // 🔑 make the atom field exactly 2 chars in BOTH modes
+  const atomField = (sym: string) =>
+    String(atomCol === "z" ? getZ(sym) : sym).padEnd(2, " "); // no extra spaces
+
   const rows = entries.map(
-    ({ sym, x, y, z }) => `${sym.padEnd(2, " ")}${col(x)}${col(y)}${col(z)}`,
+    ({ sym, x, y, z }) => `${atomField(sym)}${col(x)}${col(y)}${col(z)}`,
   );
 
   return { text: rows.join("\n"), hasHeader, count: entries.length };
@@ -170,7 +295,10 @@ export default function ConformerPage() {
   const [error, setError] = React.useState<string | null>(null);
   const [explicitH, setExplicitH] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
-  const [theme, setTheme] = React.useState<"jmol" | "gaussview">("jmol");
+  const [theme, setTheme] = React.useState<"jmol" | "gaussview" | "chemcraft">(
+    "jmol",
+  );
+  const [showZ, setShowZ] = React.useState(false);
   const atomList = React.useMemo(
     () => parseXYZAtoms(data?.geom_xyz),
     [data?.geom_xyz],
@@ -186,10 +314,15 @@ export default function ConformerPage() {
       : "—";
 
   // Pretty-print XYZ once and memoize
-  const prettyXYZ = React.useMemo(
-    () => formatXYZ(data?.geom_xyz ?? "", 6),
+  const prettySym = React.useMemo(
+    () => formatXYZ(data?.geom_xyz ?? "", 6, "sym"),
     [data?.geom_xyz],
   );
+  const prettyZ = React.useMemo(
+    () => formatXYZ(data?.geom_xyz ?? "", 6, "z"),
+    [data?.geom_xyz],
+  );
+  const displayXYZ = showZ ? prettyZ.text : prettySym.text;
   const [style, setStyle] = React.useState<"ballstick" | "line" | "spacefill">(
     "ballstick",
   );
@@ -202,12 +335,14 @@ export default function ConformerPage() {
   const labelsTemporarilyDisabled = style === "line";
   const controlsDisabled = !showLabels || labelsTemporarilyDisabled;
   const indexGutter = React.useMemo(() => {
-    const n = prettyXYZ.count ?? 0;
-    if (!n) return "";
-    return Array.from({ length: n }, (_, i) =>
-      String(i + 1).padStart(3, " "),
-    ).join("\n");
-  }, [prettyXYZ.count]);
+    const n = (showZ ? prettyZ.count : prettySym.count) ?? 0;
+    return n
+      ? Array.from({ length: n }, (_, i) =>
+          String(i + 1).padStart(3, " "),
+        ).join("\n")
+      : "";
+  }, [showZ, prettySym.count, prettyZ.count]);
+
   React.useEffect(() => {
     (async () => {
       try {
@@ -435,15 +570,18 @@ export default function ConformerPage() {
                 <CardTitle className="text-base">Geometry (XYZ)</CardTitle>
                 <CardDescription>raw coordinates</CardDescription>
               </div>
-              <div className="flex gap-2">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <span>Z numbers</span>
+                  <Switch checked={showZ} onCheckedChange={setShowZ} />
+                </div>
                 <Button
                   variant="outline"
                   size="sm"
                   onClick={() =>
-                    prettyXYZ.text &&
-                    navigator.clipboard?.writeText(prettyXYZ.text)
+                    displayXYZ && navigator.clipboard?.writeText(displayXYZ)
                   }
-                  disabled={!prettyXYZ.text}
+                  disabled={!displayXYZ}
                 >
                   Copy
                 </Button>
@@ -451,6 +589,7 @@ export default function ConformerPage() {
                   size="sm"
                   onClick={() => {
                     if (!data.geom_xyz) return;
+                    // keep download as original element XYZ (change to displayXYZ.text if you want Z there too)
                     const blob = new Blob([data.geom_xyz], {
                       type: "text/plain;charset=utf-8",
                     });
@@ -467,17 +606,18 @@ export default function ConformerPage() {
                 </Button>
               </div>
             </CardHeader>
+
             <CardContent>
-              {prettyXYZ.text ? (
-                <div className="flex gap-4">
-                  {/* Left: non-selectable index gutter */}
-                  <pre className="text-xs whitespace-pre leading-5 font-mono text-slate-400 select-none">
+              {displayXYZ ? (
+                <div className="flex gap-4 items-start">
+                  <pre
+                    className="text-xs whitespace-pre leading-5 font-mono text-slate-400 select-none pr-3 border-r border-slate-200"
+                    aria-hidden="true"
+                  >
                     {indexGutter}
                   </pre>
-
-                  {/* Right: the actual copy-safe XYZ block */}
-                  <pre className="text-xs whitespace-pre leading-5 font-mono flex-1">
-                    {prettyXYZ.text}
+                  <pre className="text-xs whitespace-pre leading-5 font-mono tabular-nums flex-1 m-0">
+                    {displayXYZ}
                   </pre>
                 </div>
               ) : (
