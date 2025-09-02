@@ -123,6 +123,7 @@ def upsert_names_for_species(
             raise TimeoutError(f"time budget exceeded after {label}")
         return out
 
+    reasons = []
     ident = species.inchikey or species.smiles
     if not ident:
         return {"added": 0, "primary_changed": False, "reason": "no_identifier"}
@@ -176,6 +177,10 @@ def upsert_names_for_species(
                             meta_data={},
                         )
                     )
+        else:
+            reasons.append("pubchem_empty")
+    else:
+        reasons.append("pubchem_no_inchikey")
 
     # ----- Cactus second (by InChIKey or SMILES) -----
     # Put IUPAC first if cactus gave one; give it modest priority after PubChem’s
@@ -189,6 +194,8 @@ def upsert_names_for_species(
 
     if need_cactus:
         c_names = timed("cactus/names+iupac", cactus_name_by_identifier, ident)
+        if not c_names:
+            reasons.append("cactus_empty")
         # filter + cap
         c_names = [s for s in c_names if _keep_synonym(s)][:MAX_CACTUS_SYNS]
         for i, name in enumerate(c_names):
@@ -197,6 +204,8 @@ def upsert_names_for_species(
             new_candidates.append(
                 (name, NameSource.cactus, kind, base_rank, {"source_note": "cactus"})
             )
+    else:
+        reasons.append("cactus_skipped")
 
     # ----- OPSIN fallback (SMILES→name) if still no IUPAC anywhere -----
     have_iupac = any(k == "iupac" for _, _, k, _, _ in new_candidates)
@@ -206,6 +215,10 @@ def upsert_names_for_species(
             new_candidates.append(
                 (nm, NameSource.opsin, "iupac", 25, {"source_note": "opsin"})
             )
+        else:
+            reasons.append("opsin_empty")
+    elif not species.smiles:
+        reasons.append("opsin_no_smiles")
 
     # ----- Dedup against existing (case-insensitive) -----
     existing = {
@@ -245,6 +258,38 @@ def upsert_names_for_species(
 
     added = _bulk_insert_names(db, to_insert)
 
+    seeded = 0
+    if added == 0:
+        # prefer IUPAC-like if available from services (already handled above).
+        # If services all empty/offline, seed a safe local synonym so every species gets 1 row.
+        seed_name = species.smiles or species.inchikey
+        if seed_name:
+            seeded_rows = [
+                {
+                    "species_id": species.species_id,
+                    "name": seed_name,
+                    "kind": "synonym",
+                    "source": NameSource.user,  # uses your Enum(NameSource)
+                    "is_primary": False,
+                    "rank": 100,
+                    "lang": "en",
+                    **({"curated": False} if hasattr(SpeciesName, "curated") else {}),
+                    **(
+                        {"source_priority": SOURCE_PRIORITY.get("user", 0)}
+                        if hasattr(SpeciesName, "source_priority")
+                        else {}
+                    ),
+                    **(
+                        {"meta_data": {"source_note": "fallback_from_identifier"}}
+                        if hasattr(SpeciesName, "meta_data")
+                        else {}
+                    ),
+                }
+            ]
+            seeded = _bulk_insert_names(db, seeded_rows)
+
+    added_total = added + seeded
+
     # ----- Primary selection logic -----
     rows = list(
         db.execute(
@@ -280,6 +325,8 @@ def upsert_names_for_species(
 
     primary_changed = False
     reason = "ok"
+    if added_total == 0:
+        reason = "no_candidates:" + ",".join(reasons) if reasons else "no_candidates"
     winner = curated_primary
 
     if not curated_primary:
@@ -306,7 +353,7 @@ def upsert_names_for_species(
         )
 
     return {
-        "added": added,
+        "added": added_total,
         "primary_changed": primary_changed,
         "source_primary": source_primary,
         "reason": reason,

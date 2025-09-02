@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { Beaker, CheckCircle2, XCircle, Copy } from "lucide-react";
 import {
   Card,
@@ -20,11 +20,25 @@ import {
   SelectItem,
   SelectValue,
 } from "@/components/ui/select";
+import { capitalizeWords } from "@/lib/utils";
 
 const API_BASE = new URL(
   (import.meta as any).env?.VITE_API_BASE ?? "/api/",
   window.location.origin,
 );
+
+const BASE = (import.meta as any).env?.BASE_URL || "/";
+
+type SpeciesNameOut = {
+  name: string;
+  kind: string;
+  lang?: string | null;
+  source: string;
+  is_primary: boolean;
+  rank: number;
+  curated: boolean;
+  source_priority: number;
+};
 
 type Detail = {
   conformer_id: number;
@@ -54,7 +68,23 @@ type Detail = {
   imag_freqs?: number[];
   frequencies?: number[];
   props?: Record<string, unknown> | null;
+  display_name?: string | null;
+  names?: SpeciesNameOut[];
 };
+
+function BackLink() {
+  const base = (import.meta as any).env?.BASE_URL || "/";
+
+  return (
+    <Link
+      to={base}
+      className="text-sm underline underline-offset-2 cursor-pointer"
+      title="Back to search"
+    >
+      ← Back to search
+    </Link>
+  );
+}
 
 const num = (x?: number | null, d = 3) =>
   x == null || !isFinite(Number(x)) ? "—" : Number(x).toFixed(d);
@@ -367,12 +397,22 @@ export default function ConformerPage() {
     <div className="max-w-5xl mx-auto p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">
-          Conformer {data.conformer_id}
-        </h1>
-        <Link className="text-sm underline" to="/">
-          ← Back to search
-        </Link>
+        <div>
+          <h1 className="text-2xl font-semibold">
+            {capitalizeWords(data.display_name) ??
+              data.well_label ??
+              `Conformer ${data.conformer_id}`}
+          </h1>
+          <div className="text-slate-500 text-sm">
+            {data.is_ts ? "TS · " : ""}
+            Conformer #{data.conformer_id} · Species #{data.species_id}
+            {data.lot?.lot_string ? ` · ${data.lot.lot_string}` : ""}
+            {typeof data.well_rank === "number"
+              ? ` · rank ${data.well_rank}`
+              : ""}
+          </div>
+        </div>
+        <BackLink />
       </div>
 
       {/* Tabs wrapper */}
@@ -400,12 +440,28 @@ export default function ConformerPage() {
                     <CardTitle className="text-base">Information</CardTitle>
                   </div>
                 </div>
-                <InfoRow label="SMILES">
-                  <div className="flex items-center justify-between gap-3">
-                    <code className="font-mono break-all text-sm">
-                      {smilesDisplay}
-                    </code>
-                    <div className="flex items-center gap-2 text-xs text-slate-500">
+              </CardHeader>
+
+              {/* Put all rows/sections in CardContent */}
+              <CardContent className="space-y-6">
+                {/* SMILES */}
+                <InfoRow
+                  label={
+                    <span className="text-sm font-semibold text-slate-700">
+                      SMILES
+                    </span>
+                  }
+                >
+                  <div className="grid grid-cols-[1fr_auto] gap-3 w-full">
+                    <div className="min-w-0">
+                      {/* reserve ~2 lines to avoid jitter */}
+                      <div className="min-h-[2.25rem]">
+                        <code className="block font-mono text-sm break-all">
+                          {smilesDisplay}
+                        </code>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-slate-500 self-start whitespace-nowrap">
                       <span>Explicit H</span>
                       <Switch
                         checked={explicitH}
@@ -414,11 +470,9 @@ export default function ConformerPage() {
                     </div>
                   </div>
                 </InfoRow>
-              </CardHeader>
-
-              <CardContent className="space-y-4">
-                {/* Level of theory mini title + details */}
-                <div>
+                <div className="border-t border-slate-200 my-3" />
+                {/* Level of theory */}
+                <section>
                   <div className="text-sm font-semibold text-slate-700 mb-2">
                     Level of theory
                   </div>
@@ -433,36 +487,100 @@ export default function ConformerPage() {
                       <span>{data.lot?.solvent ?? "—"}</span>
                     </InfoRow>
                   </div>
-                </div>
-
-                {/* status rows */}
-                <div className="space-y-2">
-                  <InfoRow label="TS">
-                    <span className="inline-flex items-center gap-2 text-sm text-slate-800">
-                      <Dot on={data.is_ts} />
-                      <span>{data.is_ts ? "Yes" : "No"}</span>
-                    </span>
-                  </InfoRow>
-
-                  <InfoRow label="Representative">
-                    <span className="inline-flex items-center gap-2 text-sm text-slate-800">
-                      <Dot on={data.is_well_representative} />
-                      <span>{data.is_well_representative ? "Yes" : "No"}</span>
-                    </span>
-                  </InfoRow>
-
-                  <InfoRow label="Well">
-                    <span className="text-sm text-slate-800">
-                      {data.well_label ?? "—"}
-                      {typeof data.well_rank === "number" ? (
-                        <span className="text-slate-500">
-                          {" "}
-                          · rank {data.well_rank}
+                </section>
+                <div className="border-t border-slate-200 my-3" />
+                {/* Attributes */}
+                <section>
+                  <div className="text-sm font-semibold text-slate-700 mb-2">
+                    Attributes
+                  </div>
+                  <div className="space-y-2">
+                    <InfoRow label="TS">
+                      <span className="inline-flex items-center gap-2 text-sm text-slate-800">
+                        <Dot on={data.is_ts} />
+                        <span>{data.is_ts ? "Yes" : "No"}</span>
+                      </span>
+                    </InfoRow>
+                    <InfoRow label="Representative">
+                      <span className="inline-flex items-center gap-2 text-sm text-slate-800">
+                        <Dot on={data.is_well_representative} />
+                        <span>
+                          {data.is_well_representative ? "Yes" : "No"}
                         </span>
-                      ) : null}
-                    </span>
-                  </InfoRow>
-                </div>
+                      </span>
+                    </InfoRow>
+                    <InfoRow label="Well">
+                      <span className="text-sm text-slate-800">
+                        {data.well_label ?? "—"}
+                        {typeof data.well_rank === "number" ? (
+                          <span className="text-slate-500">
+                            {" "}
+                            · rank {data.well_rank}
+                          </span>
+                        ) : null}
+                      </span>
+                    </InfoRow>
+                  </div>
+                </section>
+
+                {/* Names */}
+                {data.names?.length ? (
+                  <section className="pt-4 border-t border-slate-200">
+                    <div className="text-sm font-semibold text-slate-700 mb-3">
+                      Names
+                    </div>
+
+                    <InfoRow label="Preferred">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{data.display_name}</span>
+                        {(() => {
+                          const n = data.names!.find(
+                            (n) => n.name === data.display_name,
+                          );
+                          if (!n) return null;
+                          const tags = [
+                            n.is_primary ? "primary" : null,
+                            n.curated ? "curated" : null,
+                            n.lang ? n.lang : null,
+                            n.source?.toLowerCase(),
+                          ].filter(Boolean);
+                          return tags.length ? (
+                            <span className="text-xs text-slate-500">
+                              ({tags.join(" · ")})
+                            </span>
+                          ) : null;
+                        })()}
+                      </div>
+                    </InfoRow>
+
+                    {data.names.filter((n) => n.name !== data.display_name)
+                      .length > 0 && (
+                      <div className="mt-2">
+                        <InfoRow label="Synonyms">
+                          <div className="mt-1 flex flex-wrap gap-2">
+                            {data.names
+                              .filter((n) => n.name !== data.display_name)
+                              .slice(0, 12)
+                              .map((n, i) => (
+                                <span
+                                  key={`${n.name}-${i}`}
+                                  className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 border border-slate-200"
+                                  title={`${n.kind}${n.lang ? ` · ${n.lang}` : ""}${n.curated ? " · curated" : ""}${n.source ? ` · ${n.source}` : ""}`}
+                                >
+                                  {n.name}
+                                </span>
+                              ))}
+                            {data.names.length > 13 && (
+                              <span className="text-xs text-slate-500">
+                                +{data.names.length - 13} more
+                              </span>
+                            )}
+                          </div>
+                        </InfoRow>
+                      </div>
+                    )}
+                  </section>
+                ) : null}
               </CardContent>
             </Card>
 
@@ -477,7 +595,7 @@ export default function ConformerPage() {
                   <InfoRow label={data.energy_label}>
                     <div className="flex items-baseline gap-2">
                       <span className="font-mono tabular-nums text-right inline-block w-[18ch] text-base">
-                        {Number(data.energy_value).toExponential()}
+                        {Number(data.energy_value).toExponential(4)}
                       </span>
                       <span className="text-slate-500 text-sm">kJ/mol</span>
                     </div>
@@ -535,7 +653,9 @@ export default function ConformerPage() {
                       <td className="py-1">
                         <span className="font-mono tabular-nums text-right inline-block w-[18ch]">
                           {Number.isFinite((data as any)[k])
-                            ? Number((data as any)[k]).toExponential(energyDecimals)
+                            ? Number((data as any)[k]).toExponential(
+                                energyDecimals,
+                              )
                             : "—"}
                         </span>
                       </td>

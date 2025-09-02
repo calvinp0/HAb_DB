@@ -13,6 +13,7 @@ from db.models import (
     TSFeatures,
     LevelOfTheory,
     ConformerAtom,
+    SpeciesName,
 )
 from api.schemas.conformers import ConformerRow, LevelOfTheoryOut, ConformerDetailOut
 from api.services.chemid import _safe_smiles_no_h
@@ -182,6 +183,12 @@ def get_conformer(conformer_id: int, db: Session = Depends(get_db)):
         if atoms:
             geom_xyz = _atoms_to_xyz(atoms)
 
+    names = _fetch_species_names(db, conformer.species_id)
+    display_name = None
+    if names:
+        primary = next((n for n in names if n["is_primary"]), None)
+        display_name = (primary or names[0])["name"]
+
     return ConformerDetailOut.model_validate(
         {
             "conformer_id": conformer.conformer_id,
@@ -208,5 +215,48 @@ def get_conformer(conformer_id: int, db: Session = Depends(get_db)):
             "imag_freqs": getattr(tf, "imag_freqs", []) if tf else [],
             "frequencies": getattr(tf, "frequencies", []) if tf else [],
             "props": None,
+            "display_name": display_name,
+            "names": names,
         }
     )
+
+
+def _fetch_species_names(db: Session, species_id: int) -> list[dict]:
+    # order: primary → curated → source_priority asc → rank asc → name asc
+    rows = (
+        db.query(
+            SpeciesName.name,
+            SpeciesName.kind,
+            SpeciesName.lang,
+            SpeciesName.source,
+            SpeciesName.is_primary,
+            SpeciesName.rank,
+            SpeciesName.curated,
+            SpeciesName.source_priority,
+        )
+        .filter(SpeciesName.species_id == species_id)
+        .order_by(
+            SpeciesName.is_primary.desc(),
+            SpeciesName.curated.desc(),
+            SpeciesName.source_priority.asc(),
+            SpeciesName.rank.asc(),
+            SpeciesName.name.asc(),
+        )
+        .all()
+    )
+    out = []
+    for r in rows:
+        src = r.source.name if hasattr(r.source, "name") else str(r.source)
+        out.append(
+            dict(
+                name=r.name,
+                kind=r.kind,
+                lang=r.lang,
+                source=src,
+                is_primary=bool(r.is_primary),
+                rank=int(r.rank),
+                curated=bool(r.curated),
+                source_priority=int(r.source_priority),
+            )
+        )
+    return out

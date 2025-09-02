@@ -16,6 +16,8 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
 import { useNavigate } from "react-router-dom";
+
+import { ENERGY_KEYS, type EnergyKey } from "@/lib/constants";
 /**
  * Minimal React + TypeScript single-file app
  * - Search species by name / InChIKey / SMILES
@@ -53,16 +55,6 @@ export interface LevelOfTheoryOut {
   basis?: string | null;
   solvent?: string | null;
 }
-
-export const ENERGY_KEYS = [
-  "G298",
-  "H298",
-  "E0",
-  "E_elec",
-  "ZPE",
-  "E_TS",
-] as const;
-export type EnergyKey = (typeof ENERGY_KEYS)[number];
 
 export interface ConformerRow {
   conformer_id: number; // <-- add this
@@ -321,8 +313,20 @@ export default function App() {
   const [repOnly, setRepOnly] = useState(false);
   const [nonTSOnly, setNonTSOnly] = useState(false);
   const [lotId, setLotId] = useState<string | null>(null);
+  const [selectedLot, setSelectedLot] = useState<string>("__ALL__");
   const [wellRank, setWellRank] = useState<number | null>(null);
+  const lotOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(confs.map((c) => c.lot?.lot_string).filter(Boolean)),
+      ) as string[],
+    [confs],
+  );
 
+  const shownConfs = useMemo(() => {
+    if (selectedLot === "__ALL__") return confs;
+    return confs.filter((c) => c.lot?.lot_string === selectedLot);
+  }, [confs, selectedLot]);
   // Energy Column Selections
   const [energyOn, setEnergyOn] = useState<Record<EnergyKey, boolean>>({
     G298: true,
@@ -358,6 +362,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repOnly, nonTSOnly, selectedId]);
 
+  useEffect(() => {
+    setSelectedLot("__ALL__");
+    setWellRank(null);
+  }, [selectedId, confs.length]);
+
   // debounce lotId / wellRank for 300ms
   useEffect(() => {
     if (selectedId == null) return;
@@ -366,7 +375,7 @@ export default function App() {
     }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lotId, wellRank, selectedId]);
+  }, [wellRank, selectedId]);
 
   useEffect(() => {
     // Keep UX consistent: switching tabs resets current results
@@ -455,33 +464,51 @@ export default function App() {
 
   async function loadConformers(id: number) {
     setSelectedId(id);
+  }
+
+  // This effect actually fetches and handles cleanup.
+  useEffect(() => {
+    if (selectedId == null) return;
+
+    const ctrl = new AbortController();
     setConfLoading(true);
     setError(null);
-    try {
-      const url = buildUrl(`species/${id}/conformers`, {
-        representative_only: repOnly || undefined,
-        is_ts: nonTSOnly ? false : undefined,
-        lot_id: lotId || undefined,
-        well_rank: wellRank ?? undefined,
-        limit: 500,
-      });
-      const res = await fetch(url, { headers: { Accept: "application/json" } });
-      const ct = res.headers.get("content-type") || "";
-      const body = ct.includes("application/json")
-        ? await res.json().catch(() => [])
-        : [];
-      if (!res.ok)
-        throw new Error(
-          (body as any)?.detail || `${res.status} ${res.statusText}`,
-        );
-      setConfs(body as ConformerRow[]);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
-      setConfs([]);
-    } finally {
-      setConfLoading(false);
-    }
-  }
+
+    (async () => {
+      try {
+        const url = buildUrl(`species/${selectedId}/conformers`, {
+          representative_only: repOnly || undefined,
+          is_ts: nonTSOnly ? false : undefined,
+          well_rank: wellRank ?? undefined,
+          limit: 500,
+        });
+        const res = await fetch(url, {
+          headers: { Accept: "application/json" },
+          signal: ctrl.signal,
+        });
+        const ct = res.headers.get("content-type") || "";
+        const body = ct.includes("application/json")
+          ? await res.json().catch(() => [])
+          : [];
+        if (!res.ok)
+          throw new Error(
+            (body as any)?.detail || `${res.status} ${res.statusText}`,
+          );
+        setConfs(body as ConformerRow[]);
+      } catch (e: any) {
+        if (e?.name !== "AbortError") {
+          setError(e?.message ?? String(e));
+          setConfs([]);
+        }
+      } finally {
+        setConfLoading(false);
+      }
+    })();
+
+    // ✅ THIS cleanup runs when deps change/unmount
+    return () => ctrl.abort();
+  }, [selectedId, repOnly, nonTSOnly, wellRank]);
+
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="sticky top-0 z-40 backdrop-blur bg-white/70 border-b">
@@ -709,7 +736,7 @@ export default function App() {
 
             {/* Black action button with magnifier */}
             <Button
-              onClick={() => void doSearch()}
+              onClick={doSearch}
               disabled={searchLoading}
               className="w-full gap-2 rounded-xl bg-black hover:bg-neutral-900"
             >
@@ -864,12 +891,20 @@ export default function App() {
                 <span>Non-TS only</span>
               </label>
               <label className="inline-flex items-center gap-2">
-                <span>LoT ID</span>
-                <input
-                  className="w-28 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
-                  value={lotId ?? ""}
-                  onChange={(e) => setLotId(e.target.value)}
-                />
+                <span>Level of Theory</span>
+                <select
+                  className="w-52 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+                  value={selectedLot}
+                  onChange={(e) => setSelectedLot(e.target.value)}
+                  disabled={confs.length === 0}
+                >
+                  <option value="__ALL__">All LoTs</option>
+                  {lotOptions.map((lot) => (
+                    <option key={lot} value={lot}>
+                      {lot}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label className="inline-flex items-center gap-2">
                 <span>Well rank</span>
@@ -923,7 +958,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
-                  {confs.length === 0 ? (
+                  {shownConfs.length === 0 ? (
                     <tr>
                       <td
                         className="px-3 py-3 text-zinc-500"
@@ -933,7 +968,7 @@ export default function App() {
                       </td>
                     </tr>
                   ) : (
-                    confs.map((c) => (
+                    shownConfs.map((c) => (
                       <tr
                         key={c.conformer_id}
                         onClick={() =>
@@ -948,7 +983,7 @@ export default function App() {
                         role="button"
                         aria-label={`Open conformer ${c.conformer_id}`}
                       >
-                        <td className="px-3 py-2">
+                        <td className="px-3 py-2 font-medium">
                           {c.lot?.lot_string ?? (
                             <span className="text-zinc-500">—</span>
                           )}

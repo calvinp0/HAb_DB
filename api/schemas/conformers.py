@@ -1,6 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 from api.schemas.leveloftheory import LevelOfTheoryOut
+from api.schemas.speciesnames import SpeciesNameOut
 
 
 class ConformerRow(BaseModel):
@@ -32,3 +33,5 @@ class ConformerDetailOut(ConformerRow):
     imag_freqs: List[float] = []
     frequencies: List[float] = []
     props: Optional[dict] = None
+    display_name: Optional[str] = None
+    names: List[SpeciesNameOut] = []

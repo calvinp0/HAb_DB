@@ -58,4 +58,4 @@ def get(
     url: str, *, timeout: tuple[float, float] = DEFAULT_TIMEOUT, **kwargs
 ) -> requests.Response:
     """Wrapper so callers inherit default session + timeout."""
-    return get(url, timeout=timeout, **kwargs)
+    return SESSION.get(url, timeout=timeout, **kwargs)

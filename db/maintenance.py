@@ -141,7 +141,8 @@ def cmd_names(args):
                 added_total += int(rep.get("added", 0))
                 primary_changes += 1 if rep.get("primary_changed") else 0
                 src = rep.get("source_primary") or ""
-                extra = f"sid={sid} +{rep.get('added',0)} primary={rep.get('primary_changed',False)} src={src}"
+                reason = rep.get("reason", "")
+                extra = f"sid={sid} +{rep.get('added',0)} primary={rep.get('primary_changed',False)} src={src} reason={reason}"
             line = _progress_line(done, total, start_ts, extra)
             # live, single-line update:
             print(

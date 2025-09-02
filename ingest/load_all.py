@@ -34,6 +34,7 @@ from ingest.sdf_reader import iter_triplets
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 from ingest.utils import (
+    _composition_and_heavy_atoms,
     _extract_nasa_polynomials_with_rmse,
     _extract_cp_curve,
     _to_J_per_molK,
@@ -237,78 +238,134 @@ def _extract_ts_fields(props: dict) -> dict:
 
 def _extract_well_fields(props: dict) -> dict:
     """Normalize well energetics to canonical units; compute G298 if missing."""
-    # Source candidates
-    E0_kj = _first(props, "E0_kJmol", "E0_kJ/mol", "E0_kJ_per_mol")
-    E0_val = _first(props, "E0_value", "E_value", "E_elec", "E")
-    E0_units = _first(props, "E0_units", "E_units", "E_elec_units")
 
-    H298_kj = _first(props, "H298_kJmol", "H298_kJ/mol")
-    H298_val = _first(props, "H298_value", "enthalpy_298", "H_298")
-    H298_units = _first(props, "H298_units", "enthalpy_units")
-
-    G298_kj = _first(props, "G298_kJmol", "G298_kJ/mol")
-    G298_val = _first(props, "G298_value", "gibbs_298", "G_298")
-    G298_units = _first(props, "G298_units", "gibbs_units")
-
-    ZPE_kj = _first(props, "ZPE_kJmol", "ZPE_kJ/mol")
-    ZPE_val = _first(props, "ZPE", "zero_point_energy", "zero_point_kJ_mol")
-    ZPE_units = _first(props, "ZPE_units", "zpe_units")
-
-    S298_kj = _first(props, "S298_kJmol", "S298_kJ/mol")  # rare
-    S298_val = _first(props, "S298", "entropy_298", "S_298", "S298_value")
-    S298_units = _first(props, "S298_units", "entropy_units")
-
-    # Parse numbers
-    E0_kj_f = _parse_float_or_none(E0_kj)
-    H298_kj_f = _parse_float_or_none(H298_kj)
-    G298_kj_f = _parse_float_or_none(G298_kj)
-    ZPE_kj_f = _parse_float_or_none(ZPE_kj)
-    S298_kj_f = _parse_float_or_none(S298_kj)
-
-    E0_val_f = _H_to_kJmol(_parse_float_or_none(E0_val), E0_units)
-    H298_val_f = _H_to_kJmol(_parse_float_or_none(H298_val), H298_units)
-    G298_val_f = _H_to_kJmol(_parse_float_or_none(G298_val), G298_units)
-
-    # Entropy: prefer explicit, convert to kJ/mol/K
-    S298_val_f = _parse_float_or_none(S298_val)
-    S298_from_val = _S_to_kJmolK(S298_val_f, S298_units)
-    S298 = S298_from_val if S298_from_val is not None else S298_kj_f  # already kJ/mol/K
-    S298_units_out = (
-        "kJ/mol/K" if S298 is not None else None
-    )  # canonical internal units
-
-    # Energies
-    E_elec = E0_kj_f if E0_kj_f is not None else E0_val_f
-    H298 = H298_kj_f if H298_kj_f is not None else H298_val_f
-    ZPE = (
-        ZPE_kj_f
-        if ZPE_kj_f is not None
-        else _H_to_kJmol(_parse_float_or_none(ZPE_val), ZPE_units)
+    # --- Explicit electronic energy (preferred if present) ---
+    E_elec_units_raw = _first(props, "E_elec_units", "E_electronic_units")
+    E_elec_explicit = _H_to_kJmol(
+        _parse_float_or_none(_first(props, "E_elec", "E_electronic")),
+        E_elec_units_raw,
     )
 
-    # G298: prefer provided (normalized), else compute from H & S at 298.15 K
-    G_from_source = G298_kj_f if G298_kj_f is not None else G298_val_f
-    G_calc = None
-    if G_from_source is None and H298 is not None and S298 is not None:
-        G_calc = H298 - 298.15 * S298  # (kJ/mol) - K*(kJ/mol/K)
-    G298 = G_from_source if G_from_source is not None else G_calc
-    G298_units_out = "kJ/mol" if G298 is not None else None
+    if E_elec_explicit is None:
+        E_elec_kj = _parse_float_or_none(
+            _first(props, "E_elec_kJmol", "E_elec_kJ/mol", "E_electronic_kJmol")
+        )
+        if E_elec_kj is not None:
+            E_elec_explicit = E_elec_kj
+            E_elec_units_raw = "kJ/mol"
+
+    # --- E0 (total 0 K internal energy = E_elec + ZPE) ---
+    E0_units_raw = _first(props, "E0_units", "E_units")
+    E0 = None
+    E0_kj = _parse_float_or_none(
+        _first(props, "E0_kJmol", "E0_kJ/mol", "E0_kJ_per_mol")
+    )
+    if E0_kj is not None:
+        E0 = E0_kj
+    else:
+        E0_val = _parse_float_or_none(_first(props, "E0_value", "E0", "E_value"))
+        if E0_val is not None:
+            E0 = _H_to_kJmol(E0_val, E0_units_raw)
+
+    # --- H298 ---
+    H298_units_raw = _first(props, "H298_units", "enthalpy_units")
+    H298 = None
+    H298_kj = _parse_float_or_none(_first(props, "H298_kJmol", "H298_kJ/mol"))
+    if H298_kj is not None:
+        H298 = H298_kj
+    else:
+        H298_val = _parse_float_or_none(
+            _first(props, "H298_value", "enthalpy_298", "H_298")
+        )
+        if H298_val is not None:
+            H298 = _H_to_kJmol(H298_val, H298_units_raw)
+
+    # --- G298 ---
+    G298_units_raw = _first(props, "G298_units", "gibbs_units")
+    G298 = None
+    G298_kj = _parse_float_or_none(_first(props, "G298_kJmol", "G298_kJ/mol"))
+    if G298_kj is not None:
+        G298 = G298_kj
+    else:
+        G298_val = _parse_float_or_none(
+            _first(props, "G298_value", "gibbs_298", "G_298")
+        )
+        if G298_val is not None:
+            G298 = _H_to_kJmol(G298_val, G298_units_raw)
+
+    # --- ZPE ---
+    ZPE_units_raw = _first(props, "ZPE_units", "zpe_units")
+    ZPE = None
+    ZPE_kj = _parse_float_or_none(_first(props, "ZPE_kJmol", "ZPE_kJ/mol"))
+    if ZPE_kj is not None:
+        ZPE = ZPE_kj
+    else:
+        ZPE_val = _parse_float_or_none(
+            _first(props, "ZPE", "zero_point_energy", "zero_point_kJ_mol")
+        )
+        if ZPE_val is not None:
+            ZPE = _H_to_kJmol(ZPE_val, ZPE_units_raw)
+
+    # --- S298 (to kJ/mol/K) ---
+    S298_units_raw = _first(props, "S298_units", "entropy_units")
+    S298 = None
+    S298_kjmolK = _parse_float_or_none(
+        _first(props, "S298_kJmol", "S298_kJ/mol")
+    )  # rare, already kJ/mol
+    if S298_kjmolK is not None:
+        S298 = S298_kjmolK
+    else:
+        S298_val = _parse_float_or_none(
+            _first(props, "S298", "entropy_298", "S_298", "S298_value")
+        )
+        if S298_val is not None:
+            S298 = _S_to_kJmolK(S298_val, S298_units_raw)
+
+    # --- Decide E_elec ---
+    if E_elec_explicit is not None:
+        E_elec = E_elec_explicit
+        E_elec_source = "explicit"
+    elif (E0 is not None) and (ZPE is not None):
+        E_elec = E0 - ZPE
+        E_elec_source = "inferred_from_E0_minus_ZPE"
+    else:
+        E_elec = None
+        E_elec_source = None
+
+    # --- G298 fallback from H and S ---
+    if G298 is None and (H298 is not None) and (S298 is not None):
+        G298 = H298 - 298.15 * S298
+        G298_source = "backend"
+        G_calc_T_K = 298.15
+    else:
+        G298_source = "user" if G298 is not None else None
+        G_calc_T_K = None
+
+    # --- Optional consistency note ---
+    consistency_warning = None
+    if (E0 is not None) and (E_elec is not None) and (ZPE is not None):
+        if abs((E_elec + ZPE) - E0) > 0.5:  # kJ/mol tolerance
+            consistency_warning = "E0 != E_elec + ZPE beyond 0.5 kJ/mol"
 
     meta = {
-        "E0_units_raw": E0_units,
-        "H298_units_raw": H298_units,
-        "G298_units_raw": G298_units,
-        "ZPE_units_raw": ZPE_units,
-        "S298_units_raw": S298_units,
+        "E0_kJ_mol": E0,
+        "E0_units_raw": E0_units_raw,
+        "E_elec_source": E_elec_source,
+        "H298_units_raw": H298_units_raw,
+        "G298_units_raw": G298_units_raw,
+        "ZPE_units_raw": ZPE_units_raw,
+        "S298_units_raw": S298_units_raw,
     }
-    # provenance
-    if G_from_source is not None:
-        meta["G298_source"] = "user"
-    elif G_calc is not None:
-        meta["G298_source"] = "backend"
-        meta["G_calc_T_K"] = 298.15
+    if G298_source:
+        meta["G298_source"] = G298_source
+    if G_calc_T_K is not None:
+        meta["G_calc_T_K"] = G_calc_T_K
+    if consistency_warning:
+        meta["consistency_warning"] = consistency_warning
 
     return {
+        "E0": E0,
+        "E0_units": "kJ/mol" if E0 is not None else None,
         "E_elec": E_elec,
         "E_elec_units": "kJ/mol" if E_elec is not None else None,
         "ZPE": ZPE,
@@ -488,6 +545,8 @@ def upsert_species(
     spin_mult: int | None,
     mw: float | None,
     props: dict | None,
+    elements_json: dict | None = None,
+    heavy_atoms: int | None = None,
 ):
     # choose a stable identity key; inchikey if present, else (smiles, charge, spin_mult)
     q = (
@@ -501,8 +560,15 @@ def upsert_species(
     )
     sp = session.scalar(q)
     if sp:
-        # best-effort enrich
-        for k, v in dict(smiles=smiles, mw=mw, props=props).items():
+        # best-effort enrich (only set when we have a non-None value)
+        enrich = dict(
+            smiles=smiles,
+            mw=mw,
+            props=props,
+            elements_json=elements_json,
+            heavy_atoms=heavy_atoms,
+        )
+        for k, v in enrich.items():
             if v is not None:
                 setattr(sp, k, v)
         return sp.species_id
@@ -514,6 +580,8 @@ def upsert_species(
         spin_multiplicity=spin_mult,
         mw=mw,
         props=props,
+        elements_json=elements_json,
+        heavy_atoms=heavy_atoms,
     )
     session.add(sp)
     session.flush()
@@ -641,10 +709,13 @@ def upsert_cp_curve(session, conformer_id: int, curve: dict):
 
 def upsert_well_features(session: Session, conformer_id: int, fields: dict) -> None:
     tbl = WellFeatures.__table__
-    # choose PK column dynamically
     pk_col = getattr(tbl.c, "conformer_id", None)
     vals = {
         (pk_col.key): conformer_id,
+        # NEW
+        "E0": fields.get("E0"),
+        "E0_units": fields.get("E0_units"),
+        # Existing
         "E_elec": fields.get("E_elec"),
         "E_elec_units": fields.get("E_elec_units"),
         "ZPE": fields.get("ZPE"),
@@ -663,6 +734,8 @@ def upsert_well_features(session: Session, conformer_id: int, fields: dict) -> N
         .on_conflict_do_update(
             index_elements=[pk_col],
             set_={
+                "E0": vals["E0"],
+                "E0_units": vals["E0_units"],
                 "E_elec": vals["E_elec"],
                 "ZPE": vals["ZPE"],
                 "H298": vals["H298"],
@@ -856,6 +929,7 @@ def load_all(
                 lot_method = (rec.props.get("lot_method") or "").strip() or None
                 lot_basis = (rec.props.get("lot_basis") or "").strip() or None
                 lot_solvent = (rec.props.get("lot_solvent") or "").strip() or None
+                elements_json, heavy_atoms = _composition_and_heavy_atoms(rmol)
                 if not lot_method:
                     lot_method, lot_basis, lot_solvent = "unknown", None, None
                 lot_id = get_or_create_lot(session, lot_method, lot_basis, lot_solvent)
@@ -869,6 +943,8 @@ def load_all(
                         spin_mult=spin_mult,
                         mw=mw,
                         props=rec.props,
+                        elements_json=elements_json,
+                        heavy_atoms=heavy_atoms,
                     )
                     conformer_id, merged = upsert_conformer(
                         session,

@@ -1,6 +1,8 @@
+from collections import Counter
 import json
 import math
 from typing import Optional, List
+from rdkit import Chem
 
 R_J_MOLK = 8.31446261815324
 CAL_TO_J_PER_MOLK = 4.184
@@ -409,3 +411,14 @@ def map_triplet_key_atoms(
     upsert_atom_map_row(session, ts_conf, r2_conf, r2_acceptor, ts_star3_id)
     upsert_atom_map_row(session, ts_conf, r1_conf, r1_dH, ts_star2_id)
     upsert_atom_map_row(session, ts_conf, r2_conf, r2_aH, ts_star2_id)
+
+
+def _composition_and_heavy_atoms(mol: Chem.Mol) -> tuple[dict, int]:
+    """
+    Return ({'C': nC, 'H': nH, ...}, heavy_atoms_count).
+    Heavy atoms are all non-hydrogens (Z > 1).
+    """
+    symbols = [a.GetSymbol() for a in mol.GetAtoms()]
+    counts = dict(Counter(symbols))
+    heavy = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
+    return counts, heavy

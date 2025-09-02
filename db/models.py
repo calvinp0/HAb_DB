@@ -225,6 +225,8 @@ class WellFeatures(TimeStampMixin, Base):
         ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
     )
     # Lot is already on Structure; no need to repeat unless you want redundancy
+    E0: Mapped[Optional[float]] = mapped_column(Float)
+    E0_units: Mapped[Optional[str]] = mapped_column(String)
     E_elec: Mapped[Optional[float]] = mapped_column(Float)
     E_elec_units: Mapped[Optional[str]] = mapped_column(String)
     ZPE: Mapped[Optional[float]] = mapped_column(Float)
