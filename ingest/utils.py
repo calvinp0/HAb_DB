@@ -9,6 +9,16 @@ CAL_TO_J_PER_MOLK = 4.184
 HARTREE_TO_KJ_MOL = 2625.49962
 CAL_TO_KJ_MOL = 4.184
 J_TO_KJ_MOL = 0.001
+T_TOL = 0.10  # treat Tmin/Tmax within 0.10 K as the same segment
+COEF_TOL = 1e-6  # abs tolerance per coefficient when judging "effectively equal"
+
+
+SOURCE_PRIORITY_POLY = {
+    # lower number = preferred; tune as you like
+    "arkane_polynomial": 0,
+    "rmg": 1,
+    "arrhenius_csv": 5,
+}
 
 
 # at top of file (near other helpers)
@@ -422,3 +432,11 @@ def _composition_and_heavy_atoms(mol: Chem.Mol) -> tuple[dict, int]:
     counts = dict(Counter(symbols))
     heavy = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1)
     return counts, heavy
+
+
+def _src_rank(src: Optional[str]) -> int:
+    return SOURCE_PRIORITY_POLY.get((src or "").lower(), 10)
+
+
+def _coeffs_close(a: tuple[float, ...], b: tuple[float, ...], tol=COEF_TOL) -> bool:
+    return all(abs(x - y) <= tol for x, y in zip(a, b))

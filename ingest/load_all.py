@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, and_
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from db.engine import session_scope, exec_sql
@@ -41,6 +41,8 @@ from ingest.utils import (
     map_triplet_key_atoms,
     _H_to_kJmol,
     _S_to_kJmolK,
+    _src_rank,
+    _coeffs_close,
 )
 
 ROLE_MAP = {"r1h": "R1H", "r2h": "R2H", "ts": "TS"}
@@ -465,6 +467,103 @@ def _radius_ang(val: Optional[float], units: Optional[str]) -> Optional[float]:
         return val * 0.01
     # assume Å if missing
     return val
+
+
+def _pick_better(existing: NASAPolynomial, new_poly: dict) -> str:
+    """
+    Decide which one to keep ("keep_existing" or "use_new").
+    Criteria: lower RMSE wins; tie-break by SOURCE_PRIORITY.
+    """
+    e_rmse = existing.fit_rmse if existing.fit_rmse is not None else float("inf")
+    n_rmse = (
+        new_poly.get("fit_rmse")
+        if new_poly.get("fit_rmse") is not None
+        else float("inf")
+    )
+    if n_rmse + 1e-15 < e_rmse:  # strictly better
+        return "use_new"
+    if e_rmse + 1e-15 < n_rmse:
+        return "keep_existing"
+    # tie -> prefer higher-priority source
+    if _src_rank(new_poly.get("source")) < _src_rank(existing.source):
+        return "use_new"
+    return "keep_existing"
+
+
+def dedupe_and_upsert_nasa_polynomial(
+    session: Session,
+    conformer_id: int,
+    poly: dict,
+    t_tol: float = T_TOL,
+    coef_tol: float = COEF_TOL,
+) -> None:
+    """
+    Insert/merge NASA7 for a conformer with tolerance on Tmin/Tmax.
+    Collapses near-duplicate segments to a single row.
+    """
+    if poly.get("form", "").upper() != "NASA7":
+        # fall back to your existing upsert for other forms
+        return upsert_nasa_polynomial(session, conformer_id, poly)
+
+    Tmin = float(poly["Tmin_K"])
+    Tmax = float(poly["Tmax_K"])
+    coeffs = tuple(poly["coeffs"])  # a1..a7
+
+    # Find existing rows that look like the same segment within tolerance
+    q = (
+        select(NASAPolynomial)
+        .where(
+            NASAPolynomial.conformer_id == conformer_id,
+            NASAPolynomial.form == poly["form"],
+            and_(func.abs(NASAPolynomial.Tmin_K - Tmin) <= t_tol),
+            and_(func.abs(NASAPolynomial.Tmax_K - Tmax) <= t_tol),
+        )
+        .order_by(NASAPolynomial.Tmin_K.asc(), NASAPolynomial.Tmax_K.asc())
+    )
+    candidates = session.scalars(q).all()
+
+    if not candidates:
+        # nobody close -> your normal upsert (respects exact unique key)
+        return upsert_nasa_polynomial(session, conformer_id, poly)
+
+    # There is at least one existing segment "close" to this one.
+    # We compare against the *best* candidate (lowest RMSE / best source),
+    # then either overwrite it or ignore the new one.
+    # (If you want to collapse multiple existing ones, do that here too.)
+    best = min(
+        candidates,
+        key=lambda r: (
+            r.fit_rmse if r.fit_rmse is not None else float("inf"),
+            _src_rank(r.source),
+        ),
+    )
+
+    existing_coeffs = (best.a1, best.a2, best.a3, best.a4, best.a5, best.a6, best.a7)
+    same_coeffs = _coeffs_close(existing_coeffs, coeffs, coef_tol)
+
+    decision = _pick_better(best, poly) if not same_coeffs else _pick_better(best, poly)
+
+    if decision == "use_new":
+        # Overwrite the chosen existing row in place — keeps its canonical bounds
+        best.a1, best.a2, best.a3, best.a4, best.a5, best.a6, best.a7 = coeffs
+        best.source = poly.get("source")
+        best.fit_rmse = poly.get("fit_rmse")
+        best.updated_at = func.now()
+        # Optional: also normalize the stored bounds (e.g., round to 1e-3 K)
+        # best.Tmin_K = round(Tmin, 3)
+        # best.Tmax_K = round(Tmax, 3)
+
+        # Also remove the other near-duplicate candidates if any
+        for r in candidates:
+            if r.poly_id != best.poly_id:
+                session.delete(r)
+    else:
+        # keep existing; drop other near-duplicates if any (including new one)
+        # Since "new" was never inserted, nothing to delete. But we can still
+        # collapse multiple existing rows to a single 'best'.
+        for r in candidates:
+            if r.poly_id != best.poly_id:
+                session.delete(r)
 
 
 # -------------------------- role labels --------------------------
@@ -995,7 +1094,7 @@ def load_all(
                         for poly in (
                             _extract_nasa_polynomials_with_rmse(rec.props or {}) or []
                         ):
-                            upsert_nasa_polynomial(
+                            dedupe_and_upsert_nasa_polynomial(
                                 session, conformer_id=conformer_id, poly=poly
                             )
 

@@ -14,8 +14,17 @@ from db.models import (
     LevelOfTheory,
     ConformerAtom,
     SpeciesName,
+    NASAPolynomial,
+    CPCurve,
 )
-from api.schemas.conformers import ConformerRow, LevelOfTheoryOut, ConformerDetailOut
+from api.schemas.conformers import (
+    ConformerRow,
+    LevelOfTheoryOut,
+    ConformerDetailOut,
+    ThermoOut,
+)
+from api.schemas.cpcurve import CPCurveOut
+from api.schemas.nasapoly import NASA7Out
 from api.services.chemid import _safe_smiles_no_h
 
 species_scoped = APIRouter(prefix="/species", tags=["conformers"])
@@ -171,6 +180,15 @@ def get_conformer(conformer_id: int, db: Session = Depends(get_db)):
         e0 = float(wf.E_elec + wf.ZPE)
     label, value = pick_energy(bool(conformer.is_ts), wf, tf)
 
+    e0_abs = None
+    if wf and wf.E_elec is not None and wf.ZPE is not None:
+        e0_abs = float(wf.E_elec + wf.ZPE)  # absolute E0
+
+    H298_abs = float(wf.H298) if (wf and wf.H298 is not None) else None
+    G298_abs = float(wf.G298) if (wf and wf.G298 is not None) else None
+
+    E_TS_barrier = float(tf.E_TS) if (tf and tf.E_TS is not None) else None
+
     # Build XYZ
     geom_xyz = None
     if not getattr(conformer, "geom_xyz", None):
@@ -217,6 +235,10 @@ def get_conformer(conformer_id: int, db: Session = Depends(get_db)):
             "props": None,
             "display_name": display_name,
             "names": names,
+            "E0_abs_kJmol": e0_abs,
+            "H298_abs_kJmol": H298_abs,
+            "G298_abs_kJmol": G298_abs,
+            "E_TS_barrier_kJmol": E_TS_barrier,
         }
     )
 
@@ -260,3 +282,45 @@ def _fetch_species_names(db: Session, species_id: int) -> list[dict]:
             )
         )
     return out
+
+
+@conformer_detail.get("/{conformer_id}/thermo", response_model=ThermoOut)
+def get_conformer_thermo(conformer_id: int, db: Session = Depends(get_db)):
+    if not db.get(Conformer, conformer_id):
+        raise HTTPException(404, "Conformer not found")
+
+    # Cp(T) curve (one row per conformer)
+    cp_row = db.get(CPCurve, conformer_id)
+
+    curve = None
+    if cp_row:
+        curve = CPCurveOut(
+            T_K=list(cp_row.T_K or []),
+            Cp_J_per_molK=list(cp_row.Cp_J_per_molK or []),
+            raw_units=dict(cp_row.raw_units or {}),
+            Cp0_raw=cp_row.Cp0_raw,
+            CpInf_raw=cp_row.CpInf_raw,
+            source=cp_row.source,
+        )
+
+    # NASA7 segments (zero, one, or many per conformer)
+    polys_db = (
+        db.query(NASAPolynomial)
+        .filter(NASAPolynomial.conformer_id == conformer_id)
+        .order_by(NASAPolynomial.Tmin_K.asc(), NASAPolynomial.Tmax_K.asc())
+        .all()
+    )
+
+    polynomials = [
+        NASA7Out(
+            form="NASA7",
+            Tmin_K=p.Tmin_K,
+            Tmax_K=p.Tmax_K,
+            coeffs=(p.a1, p.a2, p.a3, p.a4, p.a5, p.a6, p.a7),
+            fit_rmse=p.fit_rmse,
+            source=p.source,
+        )
+        for p in polys_db
+    ]
+
+    return ThermoOut(curve=curve, polynomials=polynomials)

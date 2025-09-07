@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
 import { Beaker, CheckCircle2, XCircle, Copy } from "lucide-react";
 import {
   Card,
@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { capitalizeWords } from "@/lib/utils";
+import CpCurveViewer, { CPCurve, NASA7 } from "@/CpNasaViewer";
 
 const API_BASE = new URL(
   (import.meta as any).env?.VITE_API_BASE ?? "/api/",
@@ -342,6 +343,13 @@ export default function ConformerPage() {
     d.energy_label && d.energy_value != null
       ? `${d.energy_label}: ${Number(d.energy_value).toFixed(3)}`
       : "—";
+  const [thermo, setThermo] = React.useState<{
+    curve: CPCurve | null;
+    polynomials: NASA7[];
+  }>({
+    curve: null,
+    polynomials: [],
+  });
 
   // Pretty-print XYZ once and memoize
   const prettySym = React.useMemo(
@@ -373,6 +381,31 @@ export default function ConformerPage() {
         ).join("\n")
       : "";
   }, [showZ, prettySym.count, prettyZ.count]);
+
+  const loc = useLocation() as { state?: { fromReactionId?: number } };
+  const qs = new URLSearchParams(window.location.search);
+  const fromReactionId =
+    loc.state?.fromReactionId ??
+    (qs.get("rid") ? Number(qs.get("rid")) : undefined);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const url = new URL(`conformers/${id}/thermo`, API_BASE).toString();
+        const res = await fetch(url, {
+          headers: { Accept: "application/json" },
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body?.detail || res.statusText);
+        setThermo({
+          curve: body.curve ?? null,
+          polynomials: body.polynomials ?? [],
+        });
+      } catch {
+        setThermo({ curve: null, polynomials: [] });
+      }
+    })();
+  }, [id]);
 
   React.useEffect(() => {
     (async () => {
@@ -412,17 +445,30 @@ export default function ConformerPage() {
               : ""}
           </div>
         </div>
-        <BackLink />
+
+        {/* Render ONE back link */}
+        {fromReactionId ? (
+          <Link
+            to={`/reactions/${fromReactionId}`}
+            className="text-sm underline underline-offset-2 cursor-pointer"
+            title="Back to reaction"
+          >
+            ← Back to reaction
+          </Link>
+        ) : (
+          <BackLink />
+        )}
       </div>
 
       {/* Tabs wrapper */}
       <Tabs value={tab} onValueChange={setTab} className="w-full">
-        <TabsList className="grid w-full max-w-lg grid-cols-5">
+        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-3 md:grid-cols-6 md:max-w-none">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="energies">Energies</TabsTrigger>
           <TabsTrigger value="spectra">Spectra</TabsTrigger>
           <TabsTrigger value="geometry">Geometry</TabsTrigger>
           <TabsTrigger value="viewer3d">3D</TabsTrigger>
+          <TabsTrigger value="thermo">Thermo</TabsTrigger>
         </TabsList>
 
         {/* Overview: LoT + a compact energy snapshot */}
@@ -882,6 +928,19 @@ export default function ConformerPage() {
               />
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* Thermo */}
+        <TabsContent
+          value="thermo"
+          className="mt-4 data-[state=inactive]:hidden"
+        >
+          <CpCurveViewer
+            speciesLabel={data.display_name ?? `Conformer ${data.conformer_id}`}
+            lotString={data.lot?.lot_string ?? undefined}
+            curve={thermo.curve}
+            polynomials={thermo.polynomials}
+          />
         </TabsContent>
       </Tabs>
     </div>

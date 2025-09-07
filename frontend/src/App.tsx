@@ -16,6 +16,13 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
 import { useNavigate } from "react-router-dom";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from "@/components/ui/sheet";
 
 import { ENERGY_KEYS, type EnergyKey } from "@/lib/constants";
 /**
@@ -70,6 +77,24 @@ export interface ConformerRow {
   E0?: number | null;
   E_TS?: number | null;
 }
+
+export type RxnSideOut = {
+  role: "reactant" | "product" | "ts";
+  conformer_id: number | null;
+  species_id: number;
+  smiles?: string | null;
+  smiles_no_h?: string | null;
+  lot?: LevelOfTheoryOut | null;
+  is_ts?: boolean;
+};
+
+export type ReactionSummaryOut = {
+  reaction_id: number;
+  family: string;
+  reaction_name?: string | null;
+  participants: RxnSideOut[]; // reactants/products (+ optional TS)
+  ksets_count: number; // number of kinetics sets
+};
 
 export const FIELD =
   "h-11 w-full rounded-xl border border-zinc-300 bg-white px-3 text-base " +
@@ -227,7 +252,9 @@ function ElementPicker({
   );
 }
 
-export default function App() {
+type Mode = "molecules" | "reactions" | "ts";
+
+export default function App({ initialMode = "molecules" as Mode }) {
   /**
    * Main application component.
    *
@@ -262,8 +289,7 @@ export default function App() {
    */
   const navigate = useNavigate();
 
-  type Mode = "molecules" | "reactions" | "ts";
-  const [mode, setMode] = useState<Mode>("molecules");
+  const [mode, setMode] = useState<Mode>(initialMode);
 
   // TS Tab State
   const [tsSmiles, setTSSmiles] = useState("");
@@ -341,6 +367,19 @@ export default function App() {
     [energyOn],
   );
 
+  // Reaction Tab
+  const [rxnReactant, setRxnReactant] = useState("");
+  const [rxnProduct, setRxnProduct] = useState("");
+  const [reactions, setReactions] = useState<ReactionSummaryOut[]>([]);
+  const [rxnLoading, setRxnLoading] = useState(false);
+  const [showRxn, setShowRxn] = useState(false);
+  const [activeRxn, setActiveRxn] = useState<ReactionSummaryOut | null>(null);
+
+  function openRxnSummary(rxn: ReactionSummaryOut) {
+    setActiveRxn(rxn);
+    setShowRxn(true);
+  }
+
   // debounce for search typing
   /**
    * Debounce the search input to avoid excessive API calls.
@@ -384,6 +423,7 @@ export default function App() {
     setConfs([]);
     setOffset(0);
     setError(null);
+    setReactions([]);
   }, [mode]);
 
   async function doSearch(
@@ -405,19 +445,44 @@ export default function App() {
     setError(null);
 
     try {
-      // use overrides when provided (for Next/Prev or size changes)
       const effLimit = overrides?.limit ?? limit;
       const effOffset = overrides?.offset ?? offset;
 
+      if (mode === "reactions") {
+        setRxnLoading(true);
+        setReactions([]);
+        const params: Record<string, any> = {
+          reactant_q: rxnReactant.trim() || undefined,
+          product_q: rxnProduct.trim() || undefined,
+          limit: effLimit,
+          offset: effOffset,
+        };
+        const url = buildUrl("reactions/search", params);
+        const res = await fetch(url, {
+          headers: { Accept: "application/json" },
+        });
+        const ct = res.headers.get("content-type") || "";
+        const body = ct.includes("application/json")
+          ? await res.json().catch(() => [])
+          : [];
+        if (!res.ok)
+          throw new Error(
+            (body as any)?.detail || `${res.status} ${res.statusText}`,
+          );
+        setReactions(body as ReactionSummaryOut[]);
+        // keep species list empty for this tab
+        setSpecies([]);
+        return;
+      }
+
+      // ----- existing molecules / ts paths unchanged -----
       const params: Record<string, any> = {
         limit: effLimit,
         offset: effOffset,
       };
-
       if (mode === "molecules") {
-        if (molQ) {
-          params.q = molQ;
-        } else {
+        if (molQ) params.q = molQ;
+        else {
           if (atoms.length) {
             params.elements = atoms.join(",");
             params.elem_mode = elemMode;
@@ -426,7 +491,6 @@ export default function App() {
         }
         params.include_ts = false;
       }
-
       if (mode === "ts") {
         params.ts_only = true;
         if (tsQ) params.q = tsQ;
@@ -437,10 +501,6 @@ export default function App() {
         if (tsRequireImaginary) params.require_imag = true;
         params.de_min_kcal = tsEnergyWindow[0];
         params.de_max_kcal = tsEnergyWindow[1];
-      }
-
-      if (mode === "reactions") {
-        if (molQ) params.q = molQ;
       }
 
       const url = buildUrl("species/search", params);
@@ -457,11 +517,12 @@ export default function App() {
     } catch (e: any) {
       setError(e?.message ?? String(e));
       setSpecies([]);
+      setReactions([]);
     } finally {
       setSearchLoading(false);
+      setRxnLoading(false);
     }
   }
-
   async function loadConformers(id: number) {
     setSelectedId(id);
   }
@@ -670,9 +731,35 @@ export default function App() {
               </TabsContent>
               {/* Reactions tab (placeholder / your UI) */}
               <TabsContent value="reactions" className="mt-4 space-y-3">
-                {/* TODO: reactant/product/family inputs */}
-                <div className="text-sm text-slate-500">
-                  Reaction search coming soon.
+                <div className="grid grid-cols-1 gap-3">
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
+                      Reactant (SMILES or name)
+                    </label>
+                    <Input
+                      className={FIELD}
+                      placeholder="e.g. CC[O]"
+                      value={rxnReactant}
+                      onChange={(e) => setRxnReactant(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && doSearch()}
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
+                      Product (SMILES or name)
+                    </label>
+                    <Input
+                      className={FIELD}
+                      placeholder="optional (leave blank to get all reactions for the reactant)"
+                      value={rxnProduct}
+                      onChange={(e) => setRxnProduct(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && doSearch()}
+                    />
+                  </div>
+                </div>
+                <div className="text-xs text-slate-500">
+                  Provide either field or both. If only reactant is provided,
+                  all matching reactions are shown.
                 </div>
               </TabsContent>
 
@@ -747,20 +834,41 @@ export default function App() {
         </Card>
 
         {/* RIGHT: Results + Conformers card */}
+        {/* RIGHT: Results card (single card for all modes) */}
         <Card className="flex-1 shadow-sm">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-lg">Results</CardTitle>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between gap-3">
+              {/* Left: title */}
+              <div className="flex items-center gap-3 min-w-0">
+                <CardTitle className="text-lg truncate">
+                  {mode === "reactions" ? "Reactions" : "Results"}
+                </CardTitle>
+
+                {/* Show toggle only on Reactions */}
+                {mode === "reactions" && (
+                  <label className="inline-flex items-center gap-2 text-sm shrink-0">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 align-middle"
+                      checked={explicitSmiles}
+                      onChange={(e) => setExplicitSmiles(e.target.checked)}
+                    />
+                    <span className="leading-none">Explicit SMILES</span>
+                  </label>
+                )}
+              </div>
+
+              {/* Right: pager controls */}
               <div className="flex items-center gap-2">
                 <select
                   className="w-28 rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-sm
-                            dark:border-zinc-700 dark:bg-zinc-900"
+                     dark:border-zinc-700 dark:bg-zinc-900"
                   value={limit}
                   onChange={(e) => {
                     const v = Number(e.target.value);
                     setLimit(v);
                     setOffset(0);
-                    void doSearch({ limit: v, offset: 0 }); // <-- fetch with new page size NOW
+                    void doSearch({ limit: v, offset: 0 });
                   }}
                 >
                   <option value={10}>10 / page</option>
@@ -790,231 +898,432 @@ export default function App() {
                     setOffset(newOffset);
                     void doSearch({ offset: newOffset });
                   }}
-                  disabled={species.length < limit} // likely last page
+                  disabled={
+                    (mode === "reactions" ? reactions.length : species.length) <
+                    limit
+                  }
                 >
                   Next
                 </Button>
               </div>
             </div>
-            {error ? (
-              <div className="px-3 pb-2">
-                <span className="inline-flex items-center rounded-md bg-rose-50 px-2 py-1 text-xs font-medium text-rose-700 ring-1 ring-inset ring-rose-600/10">
-                  {error}
-                </span>
-              </div>
-            ) : null}
           </CardHeader>
-          <CardContent>
-            <label className="inline-flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={explicitSmiles}
-                onChange={(e) => setExplicitSmiles(e.target.checked)}
-              />
-              <span>Explicit SMILES</span>
-            </label>
-          </CardContent>
 
-          <CardContent className="space-y-6">
-            {/* SPECIES TABLE */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                {" "}
-                {/* no border-collapse */}
-                <thead>
-                  <tr>
-                    <th className="px-3 py-2 text-left">ID</th>
-                    <th className="px-3 py-2 text-left">SMILES</th>
-                    <th className="px-3 py-2 text-left">InChIKey</th>
-                    <th className="px-3 py-2 text-left">Charge</th>
-                    <th className="px-3 py-2 text-left">Spin</th>
-                    <th className="px-3 py-2 text-left">MW</th>
-                    <th className="px-3 py-2"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {species.map((sp) => (
-                    <tr key={sp.species_id} className="hover:bg-slate-50">
-                      <td className="px-3 py-2">{sp.species_id}</td>
-                      <td className="px-3 py-2">
-                        {(explicitSmiles
-                          ? sp.smiles
-                          : (sp.smiles_no_h ?? sp.smiles)) ?? (
-                          <span className="text-slate-400">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">{sp.inchikey}</td>
-                      <td className="px-3 py-2">{sp.charge ?? 0}</td>
-                      <td className="px-3 py-2">{sp.spin_multiplicity ?? 1}</td>
-                      <td className="px-3 py-2">
-                        {sp.mw != null ? (
-                          sp.mw.toFixed(3)
-                        ) : (
-                          <span className="text-slate-400">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        <Button
-                          onClick={() => loadConformers(sp.species_id)}
-                          className="w-full bg-black text-white hover:bg-neutral-900"
-                        >
-                          View conformers
-                        </Button>
-                      </td>
+          {/* Body switches by mode */}
+          {mode === "reactions" ? (
+            <CardContent className="space-y-4">
+              {rxnLoading && (
+                <div className="text-sm text-slate-500">
+                  Searching reactions…
+                </div>
+              )}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr>
+                      <th className="px-3 py-2 text-left">ID</th>
+                      <th className="px-3 py-2 text-left">Family</th>
+                      <th className="px-3 py-2 text-left">Reaction</th>
+                      <th className="px-3 py-2 text-left">K sets</th>
+                      <th className="px-3 py-2 text-left"></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {reactions.length === 0 ? (
+                      <tr>
+                        <td className="px-3 py-3 text-zinc-500" colSpan={5}>
+                          No reactions.
+                        </td>
+                      </tr>
+                    ) : (
+                      reactions.map((rxn) => {
+                        const reactants = rxn.participants
+                          .filter((p) => p.role === "reactant")
+                          .map((p) =>
+                            explicitSmiles
+                              ? (p.smiles ?? `[${p.species_id}]`)
+                              : (p.smiles_no_h ??
+                                p.smiles ??
+                                `[${p.species_id}]`),
+                          )
+                          .join(" + ");
+                        const products = rxn.participants
+                          .filter((p) => p.role === "product")
+                          .map((p) =>
+                            explicitSmiles
+                              ? (p.smiles ?? `[${p.species_id}]`)
+                              : (p.smiles_no_h ??
+                                p.smiles ??
+                                `[${p.species_id}]`),
+                          )
+                          .join(" + ");
 
-            {/* CONFORMERS */}
-            <h2 className="text-2xl font-semibold">Conformers</h2>
-
-            <div className="mb-2 flex flex-wrap items-center gap-6 text-sm">
-              <label className="inline-flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
-                  checked={repOnly}
-                  onChange={(e) => setRepOnly(e.target.checked)}
-                />
-                <span>Representatives only</span>
-              </label>
-              <label className="inline-flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
-                  checked={nonTSOnly}
-                  onChange={(e) => setNonTSOnly(e.target.checked)}
-                />
-                <span>Non-TS only</span>
-              </label>
-              <label className="inline-flex items-center gap-2">
-                <span>Level of Theory</span>
-                <select
-                  className="w-52 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
-                  value={selectedLot}
-                  onChange={(e) => setSelectedLot(e.target.value)}
-                  disabled={confs.length === 0}
-                >
-                  <option value="__ALL__">All LoTs</option>
-                  {lotOptions.map((lot) => (
-                    <option key={lot} value={lot}>
-                      {lot}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="inline-flex items-center gap-2">
-                <span>Well rank</span>
-                <input
-                  type="number"
-                  className="w-28 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
-                  value={wellRank ?? ""}
-                  onChange={(e) =>
-                    setWellRank(e.target.value ? Number(e.target.value) : null)
-                  }
-                />
-              </label>
-            </div>
-
-            <div className="mb-2 flex flex-wrap items-center gap-3 text-sm">
-              <span className="mr-1 font-medium text-zinc-500">
-                Show energies:
-              </span>
-              {ENERGY_KEYS.map((k) => (
-                <label key={k} className="inline-flex items-center gap-2">
+                        return (
+                          <tr
+                            key={rxn.reaction_id}
+                            className="hover:bg-slate-50 cursor-pointer"
+                            onClick={() => openRxnSummary(rxn)}
+                          >
+                            <td className="px-3 py-2">{rxn.reaction_id}</td>
+                            <td className="px-3 py-2">{rxn.family}</td>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center gap-2 font-mono text-base md:w-full">
+                                <span className="truncate" title={reactants}>
+                                  {reactants || "?"}
+                                </span>
+                                <span
+                                  aria-hidden
+                                  className="mx-1 select-none text-xl leading-none"
+                                >
+                                  ⇌
+                                </span>
+                                <span className="truncate" title={products}>
+                                  {products || "?"}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-3 py-2">{rxn.ksets_count}</td>
+                            <td className="px-3 py-2">
+                              <Button
+                                className="bg-black hover:bg-neutral-900"
+                                onClick={(e) => {
+                                  e.stopPropagation(); // keep row click from opening the drawer
+                                  navigate(`/reactions/${rxn.reaction_id}`);
+                                }}
+                              >
+                                View
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          ) : (
+            <>
+              {/* molecules / ts extras */}
+              <CardContent>
+                <label className="inline-flex items-center gap-2 text-sm">
                   <input
                     type="checkbox"
                     className="h-4 w-4"
-                    checked={energyOn[k]}
-                    onChange={(e) =>
-                      setEnergyOn((s) => ({ ...s, [k]: e.target.checked }))
-                    }
+                    checked={explicitSmiles}
+                    onChange={(e) => setExplicitSmiles(e.target.checked)}
                   />
-                  <span>
-                    {k}
-                    {k === "E_TS" ? " (TS)" : ""}
-                  </span>
+                  <span>Explicit SMILES</span>
                 </label>
-              ))}
-            </div>
+              </CardContent>
 
-            <div className="overflow-x-auto">
-              <table className="w-full border-separate border-spacing-0">
-                <thead>
-                  <tr className="bg-zinc-50 text-xs font-semibold uppercase tracking-wide dark:bg-zinc-900">
-                    <th className="px-3 py-2 text-left">LoT</th>
-                    {selectedEnergyKeys.map((k) => (
-                      <th key={k} className="px-3 py-2 text-left">
-                        {k} (kJ/mol)
-                      </th>
-                    ))}
-                    <th className="px-3 py-2 text-left">TS</th>
-                    <th className="px-3 py-2 text-left">Well</th>
-                    <th className="px-3 py-2 text-left">Rank</th>
-                    <th className="px-3 py-2 text-left">Rep</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200">
-                  {shownConfs.length === 0 ? (
-                    <tr>
-                      <td
-                        className="px-3 py-3 text-zinc-500"
-                        colSpan={2 + selectedEnergyKeys.length + 4}
-                      >
-                        {selectedId ? "No conformers." : "Select a species."}
-                      </td>
-                    </tr>
-                  ) : (
-                    shownConfs.map((c) => (
-                      <tr
-                        key={c.conformer_id}
-                        onClick={() =>
-                          navigate(`/conformers/${c.conformer_id}`)
-                        }
-                        className="hover:bg-slate-50 cursor-pointer"
-                        tabIndex={0}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ")
-                            navigate(`/conformers/${c.conformer_id}`);
-                        }}
-                        role="button"
-                        aria-label={`Open conformer ${c.conformer_id}`}
-                      >
-                        <td className="px-3 py-2 font-medium">
-                          {c.lot?.lot_string ?? (
-                            <span className="text-zinc-500">—</span>
-                          )}
-                        </td>
-                        {selectedEnergyKeys.map((k) => (
-                          <td key={k} className="px-3 py-2">
-                            {fmt((c as any)[k])}
-                          </td>
-                        ))}
-                        <td className="px-3 py-2">{c.is_ts ? "TS" : ""}</td>
-                        <td className="px-3 py-2">
-                          {c.well_label ?? (
-                            <span className="text-zinc-500">—</span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2">
-                          {c.well_rank ?? (
-                            <span className="text-zinc-500">—</span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2">
-                          {c.is_well_representative ? "✔" : "—"}
-                        </td>
+              <CardContent className="space-y-6">
+                {/* SPECIES TABLE */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr>
+                        <th className="px-3 py-2 text-left">ID</th>
+                        <th className="px-3 py-2 text-left">SMILES</th>
+                        <th className="px-3 py-2 text-left">InChIKey</th>
+                        <th className="px-3 py-2 text-left">Charge</th>
+                        <th className="px-3 py-2 text-left">Spin</th>
+                        <th className="px-3 py-2 text-left">MW</th>
+                        <th className="px-3 py-2"></th>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </CardContent>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {species.map((sp) => (
+                        <tr key={sp.species_id} className="hover:bg-slate-50">
+                          <td className="px-3 py-2">{sp.species_id}</td>
+                          <td className="px-3 py-2">
+                            {(explicitSmiles
+                              ? sp.smiles
+                              : (sp.smiles_no_h ?? sp.smiles)) ?? (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">{sp.inchikey}</td>
+                          <td className="px-3 py-2">{sp.charge ?? 0}</td>
+                          <td className="px-3 py-2">
+                            {sp.spin_multiplicity ?? 1}
+                          </td>
+                          <td className="px-3 py-2">
+                            {sp.mw != null ? (
+                              sp.mw.toFixed(3)
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2">
+                            <Button
+                              onClick={() => loadConformers(sp.species_id)}
+                              className="w-full bg-black text-white hover:bg-neutral-900"
+                            >
+                              View conformers
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* CONFORMERS */}
+                <h2 className="text-2xl font-semibold">Conformers</h2>
+
+                <div className="mb-2 flex flex-wrap items-center gap-6 text-sm">
+                  <label className="inline-flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={repOnly}
+                      onChange={(e) => setRepOnly(e.target.checked)}
+                    />
+                    <span>Representatives only</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={nonTSOnly}
+                      onChange={(e) => setNonTSOnly(e.target.checked)}
+                    />
+                    <span>Non-TS only</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2">
+                    <span>Level of Theory</span>
+                    <select
+                      className="w-52 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+                      value={selectedLot}
+                      onChange={(e) => setSelectedLot(e.target.value)}
+                      disabled={confs.length === 0}
+                    >
+                      <option value="__ALL__">All LoTs</option>
+                      {lotOptions.map((lot) => (
+                        <option key={lot} value={lot}>
+                          {lot}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="inline-flex items-center gap-2">
+                    <span>Well rank</span>
+                    <input
+                      type="number"
+                      className="w-28 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+                      value={wellRank ?? ""}
+                      onChange={(e) =>
+                        setWellRank(
+                          e.target.value ? Number(e.target.value) : null,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div className="mb-2 flex flex-wrap items-center gap-3 text-sm">
+                  <span className="mr-1 font-medium text-zinc-500">
+                    Show energies:
+                  </span>
+                  {ENERGY_KEYS.map((k) => (
+                    <label key={k} className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={energyOn[k]}
+                        onChange={(e) =>
+                          setEnergyOn((s) => ({ ...s, [k]: e.target.checked }))
+                        }
+                      />
+                      <span>
+                        {k}
+                        {k === "E_TS" ? " (TS)" : ""}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full border-separate border-spacing-0">
+                    <thead>
+                      <tr className="bg-zinc-50 text-xs font-semibold uppercase tracking-wide dark:bg-zinc-900">
+                        <th className="px-3 py-2 text-left">LoT</th>
+                        {selectedEnergyKeys.map((k) => (
+                          <th key={k} className="px-3 py-2 text-left">
+                            {k} (kJ/mol)
+                          </th>
+                        ))}
+                        <th className="px-3 py-2 text-left">TS</th>
+                        <th className="px-3 py-2 text-left">Well</th>
+                        <th className="px-3 py-2 text-left">Rank</th>
+                        <th className="px-3 py-2 text-left">Rep</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {shownConfs.length === 0 ? (
+                        <tr>
+                          <td
+                            className="px-3 py-3 text-zinc-500"
+                            colSpan={2 + selectedEnergyKeys.length + 4}
+                          >
+                            {selectedId
+                              ? "No conformers."
+                              : "Select a species."}
+                          </td>
+                        </tr>
+                      ) : (
+                        shownConfs.map((c) => (
+                          <tr
+                            key={c.conformer_id}
+                            onClick={() =>
+                              navigate(`/conformers/${c.conformer_id}`)
+                            }
+                            className="hover:bg-slate-50 cursor-pointer"
+                            tabIndex={0}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ")
+                                navigate(`/conformers/${c.conformer_id}`);
+                            }}
+                            role="button"
+                            aria-label={`Open conformer ${c.conformer_id}`}
+                          >
+                            <td className="px-3 py-2 font-medium">
+                              {c.lot?.lot_string ?? (
+                                <span className="text-zinc-500">—</span>
+                              )}
+                            </td>
+                            {selectedEnergyKeys.map((k) => (
+                              <td key={k} className="px-3 py-2">
+                                {fmt((c as any)[k])}
+                              </td>
+                            ))}
+                            <td className="px-3 py-2">{c.is_ts ? "TS" : ""}</td>
+                            <td className="px-3 py-2">
+                              {c.well_label ?? (
+                                <span className="text-zinc-500">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2">
+                              {c.well_rank ?? (
+                                <span className="text-zinc-500">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2">
+                              {c.is_well_representative ? "✔" : "—"}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </>
+          )}
         </Card>
+        <Sheet open={showRxn} onOpenChange={setShowRxn}>
+          <SheetContent side="right" className="w-[520px] sm:w-[640px]">
+            <SheetHeader>
+              <SheetTitle>
+                {activeRxn
+                  ? `Reaction ${activeRxn.reaction_id} • ${activeRxn.family}`
+                  : "Reaction"}
+              </SheetTitle>
+              <SheetDescription>
+                {activeRxn?.reaction_name || "Summary"}
+              </SheetDescription>
+            </SheetHeader>
+
+            {activeRxn && (
+              <div className="mt-4 space-y-4">
+                {/* Equation */}
+                <div className="font-mono text-base">
+                  {(() => {
+                    const reactants = activeRxn.participants
+                      .filter((p) => p.role === "reactant")
+                      .map((p) =>
+                        explicitSmiles
+                          ? (p.smiles ?? `[${p.species_id}]`)
+                          : (p.smiles_no_h ?? p.smiles ?? `[${p.species_id}]`),
+                      )
+                      .join(" + ");
+                    const products = activeRxn.participants
+                      .filter((p) => p.role === "product")
+                      .map((p) =>
+                        explicitSmiles
+                          ? (p.smiles ?? `[${p.species_id}]`)
+                          : (p.smiles_no_h ?? p.smiles ?? `[${p.species_id}]`),
+                      )
+                      .join(" + ");
+                    return (
+                      <div className="flex items-center gap-2">
+                        <span className="truncate" title={reactants}>
+                          {reactants || "?"}
+                        </span>
+                        <span
+                          aria-hidden
+                          className="mx-1 select-none text-xl leading-none"
+                        >
+                          ⇌
+                        </span>
+                        <span className="truncate" title={products}>
+                          {products || "?"}
+                        </span>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Participants */}
+                <div>
+                  <div className="text-sm text-zinc-500 mb-2">Participants</div>
+                  <ul className="space-y-1">
+                    {activeRxn.participants.map((p) => (
+                      <li
+                        key={`${p.role}-${p.conformer_id ?? p.species_id}`}
+                        className="flex items-center justify-between gap-3 text-sm"
+                      >
+                        <span className="px-2 py-0.5 rounded bg-zinc-100">
+                          {p.role}
+                        </span>
+                        <span className="font-mono truncate">
+                          {explicitSmiles
+                            ? (p.smiles ?? `[${p.species_id}]`)
+                            : (p.smiles_no_h ??
+                              p.smiles ??
+                              `[${p.species_id}]`)}
+                        </span>
+                        <span className="text-xs text-zinc-500">
+                          {p.lot?.lot_string ?? "—"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    className="bg-black hover:bg-neutral-900"
+                    onClick={() =>
+                      activeRxn &&
+                      navigate(`/reactions/${activeRxn.reaction_id}`)
+                    }
+                  >
+                    Open full page
+                  </Button>
+                  <Button variant="outline" onClick={() => setShowRxn(false)}>
+                    Close
+                  </Button>
+                </div>
+
+                <div className="text-xs text-zinc-500">
+                  {activeRxn.ksets_count} kinetics set(s)
+                </div>
+              </div>
+            )}
+          </SheetContent>
+        </Sheet>
       </div>
     </div>
   );

@@ -21,7 +21,7 @@ from api.services.chemid import (
     smiles_without_explicit_h,
 )
 from api.routers.utils import elem_counts_from_smiles, includes_elements
-from sqlalchemy import exists, and_
+from sqlalchemy import exists, and_, or_
 
 KCAL_TO_KJ = 4.184
 
@@ -281,28 +281,29 @@ def search_species(
         de_max_kcal=de_max_kcal,
     )
 
-    # Run the base query (we’ll do heavy-atom / element filters in Python)
-    rows = qry.order_by(Species.species_id.asc()).offset(offset).limit(limit).all()
-
-    # heavy-atom filter (post-query)
     if max_heavy_atoms is not None:
-        rows = [
-            sp
-            for sp in rows
-            if (lambda ha: ha is not None and ha <= max_heavy_atoms)(
-                _heavy_atoms_for_species(sp)
-            )
-        ]
+        qry = qry.filter(
+            Species.heavy_atoms.isnot(None),
+            Species.heavy_atoms <= max_heavy_atoms,
+        )
 
-    # elements filter (post-query)
+    # SQL-level elements filter via JSONB key existence
+
     if elements:
-        wanted = [e.strip() for e in elements.split(",") if e.strip()]
+        wanted = [e.strip().capitalize() for e in elements.split(",") if e.strip()]
         if wanted:
-            tmp: List[Species] = []
-            for sp in rows:
-                counts = elem_counts_from_smiles(sp.smiles or "")
-                if includes_elements(counts, wanted, elem_mode):
-                    tmp.append(sp)
-            rows = tmp
+            qry = qry.filter(Species.elements_json.isnot(None))
+            if elem_mode == "all":
+                # ALL keys must exist
+                qry = qry.filter(
+                    and_(*[Species.elements_json.has_key(w) for w in wanted])
+                )
+            else:
+                # ANY key may exist
+                qry = qry.filter(
+                    or_(*[Species.elements_json.has_key(w) for w in wanted])
+                )
+
+    rows = qry.order_by(Species.species_id.asc()).offset(offset).limit(limit).all()
 
     return _serialize_species_list(rows)

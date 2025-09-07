@@ -2,6 +2,8 @@ from pydantic import BaseModel, ConfigDict
 from typing import List, Optional
 from api.schemas.leveloftheory import LevelOfTheoryOut
 from api.schemas.speciesnames import SpeciesNameOut
+from api.schemas.cpcurve import CPCurveOut
+from api.schemas.nasapoly import NASA7Out
 
 
 class ConformerRow(BaseModel):
@@ -35,3 +37,8 @@ class ConformerDetailOut(ConformerRow):
     props: Optional[dict] = None
     display_name: Optional[str] = None
     names: List[SpeciesNameOut] = []
+
+
+class ThermoOut(BaseModel):
+    curve: CPCurveOut | None = None
+    polynomials: list[NASA7Out] = []

@@ -93,6 +93,8 @@ class Species(TimeStampMixin, Base):
             "inchikey", "charge", "spin_multiplicity", name="uq_species_identity"
         ),
         Index("ix_species_inchikey", "inchikey"),
+        Index("ix_species_heavy_atoms", "heavy_atoms"),
+        Index("ix_species_elements", "elements_json", postgresql_using="gin"),
     )
 
     conformers: Mapped[List["Conformer"]] = relationship(
