@@ -46,11 +46,9 @@ services:
     working_dir: /app
     volumes:
       - ./frontend:/app
-    command: sh -c "npm run dev -- --host 0.0.0.0 --port 5173"
-    ports:
-      - "5173:5173"     # Vite dev server
+    command: sh -lc "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    ports: ["5173:5173"]
     environment:
-      # point your frontend at the API running in Compose
       VITE_API_BASE: "/api/"
       TUNNEL: "1"
     depends_on:

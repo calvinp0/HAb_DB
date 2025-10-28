@@ -686,7 +686,7 @@ function ParticipantsTable({
 
                   <TableCell
                     title={smiles}
-                    className="font-mono truncate max-w-[28ch]"
+                    className="font-mono break-words max-w-[28ch] whitespace-normal"
                   >
                     {smiles}
                   </TableCell>
