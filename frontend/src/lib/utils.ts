@@ -11,9 +11,11 @@ export function capitalize(word: string): string {
   return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
-export function capitalizeWords(str: string): string {
+export function capitalizeWords(str?: string | null): string {
+  if (!str) return "";
   return str
     .split(" ")
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+    .map((w) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : ""))
+    .join(" ")
+    .trim();
 }

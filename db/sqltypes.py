@@ -19,7 +19,9 @@ class Mol(UserDefinedType):
     # like mol_from_ctab()/mol_from_smiles() on the DB side.
 
 
-MolRole = Enum("R1H", "R2H", "TS", name="mol_role", create_constraint=True)
+MolRole = Enum(
+    "R1H", "R2H", "TS", "R1", "R2", name="mol_role", create_constraint=True
+)
 
 AtomRole = Enum(
     "donor",

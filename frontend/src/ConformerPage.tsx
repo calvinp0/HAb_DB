@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
-import { Beaker, CheckCircle2, XCircle, Copy } from "lucide-react";
+import { Beaker, CheckCircle2, XCircle, Copy, Loader2 } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -71,6 +71,10 @@ type Detail = {
   props?: Record<string, unknown> | null;
   display_name?: string | null;
   names?: SpeciesNameOut[];
+};
+
+type AdjacencyResponse = {
+  adjacency: string;
 };
 
 function BackLink() {
@@ -370,6 +374,9 @@ export default function ConformerPage() {
     "elem" | "index" | "elem+index"
   >("elem+index");
   const [labelHydrogens, setLabelHydrogens] = React.useState(false);
+  const [adjacency, setAdjacency] = React.useState<string | null>(null);
+  const [adjacencyError, setAdjacencyError] = React.useState<string | null>(null);
+  const [adjacencyLoading, setAdjacencyLoading] = React.useState(false);
   const labelsTemporarilyDisabled = style === "line";
   const controlsDisabled = !showLabels || labelsTemporarilyDisabled;
   const [energyDecimals, setEnergyDecimals] = React.useState<number>(6);
@@ -389,6 +396,12 @@ export default function ConformerPage() {
     (qs.get("rid") ? Number(qs.get("rid")) : undefined);
 
   React.useEffect(() => {
+    setAdjacency(null);
+    setAdjacencyError(null);
+    setAdjacencyLoading(false);
+  }, [data?.conformer_id]);
+
+  React.useEffect(() => {
     (async () => {
       try {
         const url = new URL(`conformers/${id}/thermo`, API_BASE).toString();
@@ -406,6 +419,31 @@ export default function ConformerPage() {
       }
     })();
   }, [id]);
+
+  const fetchAdjacency = React.useCallback(async () => {
+    if (!data || data.is_ts) {
+      setAdjacencyError("Adjacency lists are only available for non-TS conformers");
+      return;
+    }
+    setAdjacencyError(null);
+    setAdjacencyLoading(true);
+    try {
+      const url = new URL(`conformers/${data.conformer_id}/adjacency`, API_BASE).toString();
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
+      const body: AdjacencyResponse | { detail?: string } = await res
+        .json()
+        .catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((body as any)?.detail || res.statusText);
+      }
+      setAdjacency((body as AdjacencyResponse).adjacency);
+    } catch (err) {
+      setAdjacency(null);
+      setAdjacencyError((err as Error)?.message || "Unable to fetch adjacency list");
+    } finally {
+      setAdjacencyLoading(false);
+    }
+  }, [data]);
 
   React.useEffect(() => {
     (async () => {
@@ -432,8 +470,8 @@ export default function ConformerPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">
-            {capitalizeWords(data.display_name) ??
-              data.well_label ??
+            {capitalizeWords(data.display_name) ||
+              data.well_label ||
               `Conformer ${data.conformer_id}`}
           </h1>
           <div className="text-slate-500 text-sm">
@@ -810,6 +848,54 @@ export default function ConformerPage() {
               )}
             </CardContent>
           </Card>
+          {!data?.is_ts && (
+            <Card className="mt-4">
+              <CardHeader className="flex flex-row items-center justify-between">
+                <div>
+                  <CardTitle className="text-base">RMG adjacency list</CardTitle>
+                  <CardDescription>fetched from rmg.mit.edu</CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={fetchAdjacency}
+                    disabled={adjacencyLoading}
+                  >
+                    {adjacencyLoading ? (
+                      <span className="flex items-center gap-1">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Fetching
+                      </span>
+                    ) : (
+                      "Fetch"
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => adjacency && navigator.clipboard?.writeText(adjacency)}
+                    disabled={!adjacency}
+                  >
+                    Copy
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {adjacencyError && (
+                  <div className="text-sm text-red-600 mb-2">{adjacencyError}</div>
+                )}
+                {adjacency ? (
+                  <pre className="text-xs whitespace-pre leading-5 font-mono tabular-nums">
+                    {adjacency}
+                  </pre>
+                ) : (
+                  <p className="text-sm text-slate-500">
+                    Click fetch to retrieve the RMG adjacency list for this conformer.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         {/** 3D */}
@@ -940,6 +1026,7 @@ export default function ConformerPage() {
             lotString={data.lot?.lot_string ?? undefined}
             curve={thermo.curve}
             polynomials={thermo.polynomials}
+            active={tab === "thermo"}
           />
         </TabsContent>
       </Tabs>

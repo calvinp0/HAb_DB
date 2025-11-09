@@ -27,15 +27,25 @@ from sqlalchemy.sql import func
 
 router = APIRouter(prefix="/reactions", tags=["reactions"])
 
-MOL_ROLE_REACTANT = "R1H"
-MOL_ROLE_PRODUCT = "R2H"
+REACTANT_ROLES = {"R1H", "R2"}
+PRODUCT_ROLES = {"R1", "R2H"}
 MOL_ROLE_TS = "TS"
 
 
-def _species_ids_from_query(db: Session, q: str) -> list[int]:
+def _species_ids_from_query(
+    db: Session, q: str, *, allow_fuzzy: bool = False
+) -> list[int]:
     q = q.strip()
     if not q:
         return []
+
+    def _ids_for_smiles(smiles: str) -> list[int]:
+        return [
+            sid
+            for (sid,) in db.query(Species.species_id)
+            .filter(Species.smiles == smiles)
+            .all()
+        ]
 
     # InChIKey
     if looks_like_inchikey(q):
@@ -64,16 +74,29 @@ def _species_ids_from_query(db: Session, q: str) -> list[int]:
             if ids:
                 return ids
 
-        ids = [
-            sid
-            for (sid,) in db.query(Species.species_id)
-            .filter(Species.smiles == can)
-            .all()
-        ]
+        ids = _ids_for_smiles(can)
         if ids:
             return ids
     except Exception:
-        pass
+        can = None
+
+    # If canonicalization failed or didn't find anything, try the raw query literally.
+    literal_ids = _ids_for_smiles(q)
+    if literal_ids:
+        return literal_ids
+
+    if allow_fuzzy and len(q) >= 2:
+        escaped = q.replace("%", "\\%").replace("_", "\\_")
+        like_term = f"%{escaped}%"
+        fuzzy_ids = [
+            sid
+            for (sid,) in db.query(Species.species_id)
+            .filter(Species.smiles.ilike(like_term, escape="\\"))
+            .limit(200)
+            .all()
+        ]
+        if fuzzy_ids:
+            return fuzzy_ids
 
     # Name contains
     return [
@@ -93,20 +116,49 @@ def search_reactions(
     reactant_q: Optional[str] = Query(
         None, description="Reactant SMILES/name/InChIKey"
     ),
+    reactant_q2: Optional[str] = Query(
+        None,
+        description="Optional second reactant SMILES/name/InChIKey that must also be present",
+    ),
     product_q: Optional[str] = Query(None, description="Product SMILES/name/InChIKey"),
+    fuzzy_reactants: bool = Query(
+        False,
+        description="Allow substring reactant matching when no exact species match is found",
+    ),
     family: Optional[str] = Query(None, description="Reaction family"),
     limit: int = Query(
         100, ge=1, le=1000, description="Max number of results to return"
     ),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ):
-    if not reactant_q and not product_q:
+    if not reactant_q and not reactant_q2 and not product_q:
         return []
+
+    fuzzy_terms: list[tuple[str, str]] = []  # ("reactant", term)
 
     reactant_ids: List[int] = (
         _species_ids_from_query(db, reactant_q) if reactant_q else []
     )
-    product_ids: List[int] = _species_ids_from_query(db, product_q) if product_q else []
+    if reactant_q and not reactant_ids:
+        if fuzzy_reactants:
+            fuzzy_terms.append(("reactant", reactant_q.strip().lower()))
+        else:
+            return []
+
+    reactant2_ids: List[int] = (
+        _species_ids_from_query(db, reactant_q2) if reactant_q2 else []
+    )
+    if reactant_q2 and not reactant2_ids:
+        if fuzzy_reactants:
+            fuzzy_terms.append(("reactant", reactant_q2.strip().lower()))
+        else:
+            return []
+
+    product_ids: List[int] = (
+        _species_ids_from_query(db, product_q, allow_fuzzy=False) if product_q else []
+    )
+    if product_q and not product_ids:
+        return []
 
     # Base Query
     rq = db.query(Reaction)
@@ -121,12 +173,25 @@ def search_reactions(
         cond_r = exists().where(
             and_(
                 rp_r.reaction_id == Reaction.reaction_id,
-                rp_r.role == MOL_ROLE_REACTANT,
+                rp_r.role.in_(REACTANT_ROLES),
                 rp_r.conformer_id == conf_r.conformer_id,
                 conf_r.species_id.in_(reactant_ids),
             )
         )
         rq = rq.filter(cond_r)
+
+    if reactant2_ids:
+        rp_r2 = aliased(ReactionParticipant)
+        conf_r2 = aliased(Conformer)
+        cond_r2 = exists().where(
+            and_(
+                rp_r2.reaction_id == Reaction.reaction_id,
+                rp_r2.role.in_(REACTANT_ROLES),
+                rp_r2.conformer_id == conf_r2.conformer_id,
+                conf_r2.species_id.in_(reactant2_ids),
+            )
+        )
+        rq = rq.filter(cond_r2)
 
     if product_ids:
         rp_p = aliased(ReactionParticipant)
@@ -134,7 +199,7 @@ def search_reactions(
         cond_p = exists().where(
             and_(
                 rp_p.reaction_id == Reaction.reaction_id,
-                rp_p.role == MOL_ROLE_PRODUCT,
+                rp_p.role.in_(PRODUCT_ROLES),
                 rp_p.conformer_id == conf_p.conformer_id,
                 conf_p.species_id.in_(product_ids),
             )
@@ -158,6 +223,26 @@ def search_reactions(
 
     rows = rq.all()
 
+    if fuzzy_terms:
+        def _matches_fuzzy(rxn: Reaction) -> bool:
+            for term_role, term in fuzzy_terms:
+                term = term.lower()
+                if term_role == "reactant":
+                    found = False
+                    for p in rxn.participants:
+                        if p.role in REACTANT_ROLES:
+                            sp = p.conformer.species if p.conformer else None
+                            if sp and sp.smiles and term in sp.smiles.lower():
+                                found = True
+                                break
+                    if not found:
+                        return False
+                else:
+                    return False
+            return True
+
+        rows = [rxn for rxn in rows if _matches_fuzzy(rxn)]
+
     kcounts = dict(
         db.query(RateModel.reaction_id, func.count(RateModel.rate_model_id))
         .group_by(RateModel.reaction_id)
@@ -175,9 +260,9 @@ def search_reactions(
 
             if (p.conformer and p.conformer.is_ts) or (p.role == MOL_ROLE_TS):
                 ui_role = "ts"
-            elif p.role == MOL_ROLE_REACTANT:
+            elif p.role in REACTANT_ROLES:
                 ui_role = "reactant"
-            elif p.role == MOL_ROLE_PRODUCT:
+            elif p.role in PRODUCT_ROLES:
                 ui_role = "product"
             else:
                 ui_role = "reactant"

@@ -6,13 +6,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional, Dict, List, Tuple, Literal
+from typing import Any, Iterator, Optional, Dict, List, Tuple, Literal, Sequence, Set
 import json
 import ast
 
 from rdkit import Chem
 
-Role = Literal["R1H", "R2H", "TS"]
+Role = Literal["R1H", "R2H", "TS", "R1", "R2"]
+ALL_ROLES: Tuple[Role, ...] = ("R1H", "R2H", "TS", "R1", "R2")
 
 
 @dataclass
@@ -75,7 +76,7 @@ def _jsonish_or_none(s: str | None):
 
 
 def _detect_role(
-    props: Dict[str, str], idx_in_triplet: int, order_hint: Tuple[Role, Role, Role]
+    props: Dict[str, str], idx_in_group: int, order_hint: Sequence[Role]
 ) -> Role:
     # Prefer explicit data field. Common keys: ROLE, role, MolRole, mol_role, type
     for key in ("ROLE", "role", "MolRole", "mol_role", "type"):
@@ -83,10 +84,10 @@ def _detect_role(
         if not val:
             continue
         v = val.strip().upper()  # 'r1h' -> 'R1H'
-        if v in ("R1H", "R2H", "TS"):
+        if v in ALL_ROLES:
             return v  # type: ignore[return-value]
     # Fallback to position-based mapping
-    return order_hint[idx_in_triplet]
+    return order_hint[idx_in_group % len(order_hint)]
 
 
 def _to_molblock(mol: Chem.Mol) -> str:
@@ -99,9 +100,9 @@ def iter_triplets(
     *,
     sanitize: bool = True,
     strict_roles: bool = True,
-    order_hint: Tuple[Role, Role, Role] = ("R1H", "R2H", "TS"),
+    order_hint: Sequence[Role] = ALL_ROLES,
 ) -> Iterator[ReactionTriplet]:
-    """Yield ReactionTriplet from an SDF expected to contain 3-record groups.
+    """Yield ReactionTriplet from an SDF expected to contain grouped records.
 
     Parameters
     ----------
@@ -112,15 +113,16 @@ def iter_triplets(
         raw inputs and postpone cleanup to a standardization step.
     strict_roles : bool
         If True, every record must carry an explicit ROLE data field with
-        one of {R1H,R2H,TS}. If False, fallback to position-based mapping
+        one of the known roles. If False, fallback to position-based mapping
         using `order_hint` for any missing ROLE.
     order_hint : tuple
-        Expected order for triplets when ROLE is absent.
+        Expected order for grouped records when ROLE is absent. Defaults to
+        (R1H, R2H, TS, R1, R2).
 
     Yields
     ------
     ReactionTriplet
-        A dict-like structure with three MolRecords keyed by role.
+        A dict-like structure keyed by role for each molecule record in the group.
 
     Raises
     ------
@@ -132,7 +134,16 @@ def iter_triplets(
     if supplier is None:
         raise ValueError(f"Cannot open SDF: {sdf_path}")
 
+    order_hint = tuple(order_hint)
+    if any(r not in ALL_ROLES for r in order_hint):
+        raise ValueError(
+            f"order_hint may only contain known roles {ALL_ROLES}, got {order_hint}"
+        )
+    expected_roles: Set[Role] = set(order_hint)
+    required_roles: Set[Role] = {"R1H", "R2H", "TS"}
+
     buffer: Dict[Role, MolRecord] = {}
+    records_in_group = 0
     triplet_reaction_name: Optional[str] = None
     for i, mol in enumerate(supplier):
         if mol is None:
@@ -150,12 +161,12 @@ def iter_triplets(
                 or props.get("mol_role")
             )
             role_str = (role_str or "").strip().upper()
-            if role_str not in ("R1H", "R2H", "TS"):
+            if role_str not in ALL_ROLES:
                 raise ValueError("Record missing explicit role/type in strict mode")
             role: Role = role_str  # type: ignore[assignment]
         else:
-            pos_in_triplet = i % 3
-            role = _detect_role(props, pos_in_triplet, order_hint)
+            pos_in_group = records_in_group % len(order_hint)
+            role = _detect_role(props, pos_in_group, order_hint)
 
         rxn_name = (
             props.get("reaction") or props.get("REACTION") or ""
@@ -189,14 +200,13 @@ def iter_triplets(
             electro_map=em,
         )
 
-        buffer[role] = rec
-
-        if len(buffer) == 3:
-            # Ensure we have exactly the three roles
-            missing = {"R1H", "R2H", "TS"} - set(buffer)
-            if missing:
+        # Starting a new record group before flushing the previous one indicates
+        # that we're missing at least one required role.
+        if role in buffer:
+            missing_required = required_roles - set(buffer)
+            if missing_required:
                 raise ValueError(
-                    f"Triplet at approx records [{i-2},{i-1},{i}] missing roles: {missing}"
+                    f"Triplet starting near record {i} missing required roles: {missing_required}"
                 )
             yield ReactionTriplet(
                 source_file=str(Path(sdf_path).resolve()),
@@ -205,6 +215,25 @@ def iter_triplets(
             )
             buffer.clear()
             triplet_reaction_name = None
+            records_in_group = 0
+
+        buffer[role] = rec
+        records_in_group += 1
+
+        if len(buffer) == len(expected_roles):
+            missing = required_roles - set(buffer)
+            if missing:
+                raise ValueError(
+                    f"Triplet at approx records [{i-(len(order_hint)-1)},{i}] missing required roles: {missing}"
+                )
+            yield ReactionTriplet(
+                source_file=str(Path(sdf_path).resolve()),
+                reaction_name=triplet_reaction_name,
+                records=dict(buffer),
+            )
+            buffer.clear()
+            triplet_reaction_name = None
+            records_in_group = 0
     if buffer:
         # Incomplete triplet at EOF
         roles = ", ".join(sorted(buffer.keys()))

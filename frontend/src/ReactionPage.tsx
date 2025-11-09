@@ -78,7 +78,10 @@ type SpeciesLite = {
   smiles?: string | null;
   smiles_no_h?: string | null;
 };
-type Participant = { role: "R1H" | "R2H" | "TS"; conformer: ConformerLite };
+type Participant = {
+  role: "R1H" | "R2H" | "TS" | "R1" | "R2";
+  conformer: ConformerLite;
+};
 
 type RateModel = {
   rate_model_id: number;
@@ -408,18 +411,18 @@ function View3DButton({
 
 type ParticipantWire =
   | {
-      role: "R1H" | "R2H" | "TS";
+      role: "R1H" | "R2H" | "TS" | "R1" | "R2";
       conformer: ConformerLite;
       smiles?: string | null;
       smiles_no_h?: string | null;
     }
   | (ConformerLite & {
-      role: "R1H" | "R2H" | "TS";
+      role: "R1H" | "R2H" | "TS" | "R1" | "R2";
       smiles?: string | null;
       smiles_no_h?: string | null;
     })
   | {
-      role: "R1H" | "R2H" | "TS";
+      role: "R1H" | "R2H" | "TS" | "R1" | "R2";
       c: ConformerLite;
       smiles?: string | null;
       smiles_no_h?: string | null;
@@ -741,52 +744,77 @@ function ReactionCoordinate({
   const pick = (role: Participant["role"]) =>
     participants.find((p) => p.role === role)?.conformer;
 
-  const r1 = pick("R1H");
+  const r1h = pick("R1H");
+  const r2 = pick("R2");
   const ts = pick("TS");
-  const r2 = pick("R2H");
+  const r1 = pick("R1");
+  const r2h = pick("R2H");
 
-  // pull server-picked energies
-  let eR1 = r1 ? (energyByConfId[r1.conformer_id] ?? null) : null;
-  let eTS = ts ? (energyByConfId[ts.conformer_id] ?? null) : null;
-  let eR2 = r2 ? (energyByConfId[r2.conformer_id] ?? null) : null;
+  const energyFor = (c?: ConformerLite) =>
+    c ? (energyByConfId[c.conformer_id] ?? null) : null;
 
-  // unit guard: if the spread is obviously J/mol, convert to kJ/mol
-  const finite = [eR1, eTS, eR2].filter((v): v is number =>
+  let eR1H = energyFor(r1h);
+  let eR2 = energyFor(r2);
+  let eTS = energyFor(ts);
+  let eR1 = energyFor(r1);
+  let eR2H = energyFor(r2h);
+
+  const singles = [eR1H, eR2, eTS, eR1, eR2H].filter((v): v is number =>
     Number.isFinite(v as number),
   );
-  if (finite.length >= 2) {
-    const spread = Math.max(...finite) - Math.min(...finite);
+  if (singles.length >= 2) {
+    const spread = Math.max(...singles) - Math.min(...singles);
     if (spread > 5000) {
-      // ≫ typical kJ/mol scales → must be J/mol
-      const s = 1 / 1000;
-      eR1 = Number.isFinite(eR1 as number) ? (eR1 as number) * s : eR1;
-      eTS = Number.isFinite(eTS as number) ? (eTS as number) * s : eTS;
-      eR2 = Number.isFinite(eR2 as number) ? (eR2 as number) * s : eR2;
+      const scale = 1 / 1000;
+      eR1H = Number.isFinite(eR1H as number) ? (eR1H as number) * scale : eR1H;
+      eR2 = Number.isFinite(eR2 as number) ? (eR2 as number) * scale : eR2;
+      eTS = Number.isFinite(eTS as number) ? (eTS as number) * scale : eTS;
+      eR1 = Number.isFinite(eR1 as number) ? (eR1 as number) * scale : eR1;
+      eR2H = Number.isFinite(eR2H as number) ? (eR2H as number) * scale : eR2H;
     }
   }
 
-  // reference = R1H (else lowest well, else min finite)
-  const wells = [eR1, eR2].filter((v): v is number =>
-    Number.isFinite(v as number),
+  const sumEnergy = (...vals: Array<number | null>) => {
+    const finite = vals.filter((v): v is number => Number.isFinite(v as number));
+    return finite.length ? finite.reduce((a, b) => a + b, 0) : null;
+  };
+
+  const eReactants = sumEnergy(eR1H, eR2);
+  const eProducts = sumEnergy(eR1, eR2H);
+
+  const referencePool = [eReactants, eTS, eProducts].filter(
+    (v): v is number => Number.isFinite(v as number),
   );
-  const all = [eR1, eTS, eR2].filter((v): v is number =>
-    Number.isFinite(v as number),
-  );
-  const zero = Number.isFinite(eR1 as number)
-    ? (eR1 as number)
-    : wells.length
-      ? Math.min(...wells)
-      : all.length
-        ? Math.min(...all)
-        : 0;
+  const zero = Number.isFinite(eReactants as number)
+    ? (eReactants as number)
+    : referencePool.length
+      ? Math.min(...referencePool)
+      : 0;
 
   const rel = (v: number | null) =>
     Number.isFinite(v as number) ? (v as number) - zero : null;
 
+  const reactantLabel = [r1h?.well_label || "R1H", r2?.well_label || "R2"]
+    .filter(Boolean)
+    .join(" + ");
+  const productLabel = [r1?.well_label || "R1", r2h?.well_label || "R2H"]
+    .filter(Boolean)
+    .join(" + ");
+
   const data = [
-    r1 && { key: "R1H", label: r1.well_label ?? "well", raw: eR1, E: rel(eR1) },
+    eReactants != null && {
+      key: "reactants",
+      label: reactantLabel || "R1H + R2",
+      raw: eReactants,
+      E: rel(eReactants),
+    },
     ts && { key: "TS", label: "TS", raw: eTS, E: rel(eTS) },
-    r2 && { key: "R2H", label: r2.well_label ?? "well", raw: eR2, E: rel(eR2) },
+    eProducts != null && {
+      key: "products",
+      label: productLabel || "R1 + R2H",
+      raw: eProducts,
+      E: rel(eProducts),
+    },
   ].filter(Boolean) as Array<{
     key: string;
     label: string;
@@ -795,18 +823,18 @@ function ReactionCoordinate({
   }>;
 
   const dE_rxn =
-    Number.isFinite(eR1 as number) && Number.isFinite(eR2 as number)
-      ? (eR2 as number) - (eR1 as number)
+    Number.isFinite(eReactants as number) && Number.isFinite(eProducts as number)
+      ? (eProducts as number) - (eReactants as number)
       : null;
 
   const dE_dagger_fwd =
-    Number.isFinite(eR1 as number) && Number.isFinite(eTS as number)
-      ? (eTS as number) - (eR1 as number)
+    Number.isFinite(eReactants as number) && Number.isFinite(eTS as number)
+      ? (eTS as number) - (eReactants as number)
       : null;
 
   const dE_dagger_rev =
-    Number.isFinite(eR2 as number) && Number.isFinite(eTS as number)
-      ? (eTS as number) - (eR2 as number)
+    Number.isFinite(eProducts as number) && Number.isFinite(eTS as number)
+      ? (eTS as number) - (eProducts as number)
       : null;
 
   return (
@@ -814,8 +842,8 @@ function ReactionCoordinate({
       <CardHeader>
         <CardTitle className="text-base">Reaction coordinate (PES)</CardTitle>
         <CardDescription>
-          R1H → TS → R2H · energies from backend (relative to{" "}
-          {Number.isFinite(eR1 as number) ? "R1H" : "lowest well"})
+          R1H + R2 → TS → R1 + R2H · energies from backend (relative to{" "}
+          {Number.isFinite(eReactants as number) ? "reactants" : "lowest well"})
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -1087,7 +1115,7 @@ export default function ReactionPage() {
 
   // ✅ compute order OUTSIDE JSX
   const reactantCount = rxn.participants.filter(
-    (p) => p.role === "R1H" || p.role === "R2H",
+    (p) => p.role === "R1H" || p.role === "R2",
   ).length;
   const order = Math.max(1, Math.min(3, reactantCount)); // clamp 1..3
 

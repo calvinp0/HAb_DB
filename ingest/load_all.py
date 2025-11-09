@@ -18,7 +18,7 @@ from db.models import (
     Species,
     Conformer,
     ConformerAtom,
-    AtomRoleMap,
+    ParticipantAtomRole,
     GeomDistance,
     GeomAngle,
     GeomDihedral,
@@ -30,7 +30,7 @@ from db.models import (
     CPCurve,
 )
 from db.utils import geom_hash
-from ingest.sdf_reader import iter_triplets
+from ingest.sdf_reader import iter_triplets, ALL_ROLES
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 from ingest.utils import (
@@ -43,14 +43,21 @@ from ingest.utils import (
     _S_to_kJmolK,
     _src_rank,
     _coeffs_close,
+    T_TOL, COEF_TOL,
 )
 
-ROLE_MAP = {"r1h": "R1H", "r2h": "R2H", "ts": "TS"}
-FRAME_MAP = {"R1H": "ref_d_hydrogen", "R2H": "ref_a_hydrogen", "TS": "none"}
+ROLE_MAP = {"r1h": "R1H", "r2h": "R2H", "ts": "TS", "r1": "R1", "r2": "R2"}
+FRAME_MAP = {
+    "R1H": "ref_d_hydrogen",
+    "R2H": "ref_a_hydrogen",
+    "TS": "none",
+    "R1": "none",
+    "R2": "none",
+}
 HARTREE_TO_KJ_MOL = 2625.49962
 CAL_TO_KJ_MOL = 4.184
 J_TO_KJ_MOL = 0.001
-REQUIRED_ROLES = ("R1H", "R2H", "TS")
+REQUIRED_ROLES = ("R1H", "R2H", "R1", "R2", "TS")
 # -------------------------- CSV helpers --------------------------
 
 
@@ -102,7 +109,7 @@ def _parse_float_or_none(v) -> Optional[float]:
 
 
 def _index_csv(csv_path: Path) -> Dict[str, Dict[str, Dict[int, dict]]]:
-    """Index CSV by reaction → role (R1H/R2H/TS) → focus_atom_idx → row dict."""
+    """Index CSV by reaction → role (R1H/R2H/R1/R2/TS) → focus_atom_idx → row dict."""
     idx: Dict[str, Dict[str, Dict[int, dict]]] = {}
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -392,7 +399,7 @@ def _index_kinetics_csv_rmg(csv_path: Path) -> Dict[str, list[dict]]:
     with csv_path.open("r", encoding="utf-8", newline="") as fh:
         r = csv.DictReader(fh)
         for row in r:
-            rxn = (row.get("reaction_label") or "").strip()
+            rxn = (row.get("reaction_label") or row.get("rxn") or "").strip()
             if not rxn:
                 continue
 
@@ -568,6 +575,15 @@ def dedupe_and_upsert_nasa_polynomial(
 
 # -------------------------- role labels --------------------------
 
+ALLOWED_ATOM_ROLES_BY_PART = {
+    "R1H": {"donor", "d_hydrogen"},
+    "R2H": {"acceptor", "a_hydrogen"},
+    "TS": {"donor", "acceptor", "d_hydrogen", "a_hydrogen"},
+    "R1": {"donor"},
+    "R2": {"acceptor"},
+}
+
+
 
 def _norm_label(lbl: str) -> str:
     return {"donator": "donor"}.get(lbl.lower(), lbl.lower())
@@ -687,18 +703,45 @@ def upsert_species(
     return sp.species_id
 
 
+
+# def _debug_roundtrip_molblock(session: Session, molblock: str) -> None:
+#     # Round-trip through the RDKit/Postgres functions in-memory
+#     q = select(
+#         func.mol_to_ctab(
+#             func.mol_from_ctab(molblock, True),  # store coords
+#             True,  # gen 2D if missing (doesn't affect atom count)
+#             True,  # v3000
+#         )
+#     )
+#     db_ctab = session.execute(q).scalar()
+#     if not db_ctab:
+#         print("DEBUG: mol_from_ctab() returned NULL")
+#         return
+
+#     m2 = Chem.MolFromMolBlock(db_ctab, sanitize=False, removeHs=False)
+#     if m2 is None:
+#         print("DEBUG: RDKit failed to read round-tripped CTAB")
+#         print(db_ctab[:400])
+#         return
+
+#     n_atoms = m2.GetNumAtoms()
+#     n_H = sum(1 for a in m2.GetAtoms() if a.GetAtomicNum() == 1)
+#     print(f"DEBUG: roundtrip mol_from_ctab -> mol_to_ctab atoms={n_atoms} H={n_H}")
+
+
 def upsert_conformer(
     session: Session,
     species_id: int,
     lot_id: int,
-    mol_rdkit_smiles: str,
+    rd_mol: Chem.Mol,
     geometry_hash: str,
     well_label: str | None,
     is_ts: bool,
 ):
     tbl = Conformer.__table__
+    molblock = Chem.MolToMolBlock(rd_mol)
 
-    # 1) Try insert; if conflict, do nothing.
+    # Insert new conformer
     ins = (
         pg_insert(tbl)
         .values(
@@ -707,18 +750,19 @@ def upsert_conformer(
             geometry_hash=geometry_hash,
             well_label=well_label,
             is_ts=is_ts,
-            mol=func.mol_from_smiles(mol_rdkit_smiles),
+            # Canonical search mol (RDKit extension will strip explicit H → ok)
+            mol=func.mol_from_ctab(molblock),
+            # Full explicit-H geometry snapshot
+            mol_raw_ctab=molblock,
         )
         .on_conflict_do_nothing(constraint="uq_conformer_geom")
         .returning(tbl.c.conformer_id)
     )
     res = session.execute(ins).first()
-
     if res:
-        # Fresh insert
-        return res[0], False  # (conformer_id, merged=False)
+        return res[0], False  # not merged; freshly inserted
 
-    # 2) Conflict path → update the existing row and fetch its id
+    # If exists (uq_conformer_geom hit), update metadata + keep mols in sync
     upd = (
         update(tbl)
         .where(
@@ -729,22 +773,23 @@ def upsert_conformer(
         .values(
             well_label=well_label,
             is_ts=is_ts,
-            mol=func.mol_from_smiles(mol_rdkit_smiles),
+            mol=func.mol_from_ctab(molblock),
+            mol_raw_ctab=molblock,
             updated_at=func.now(),
         )
         .returning(tbl.c.conformer_id)
     )
     res2 = session.execute(upd).first()
     if not res2:
-        # extremely unlikely; safety fallback to select
+        # Extremely rare fallback: select manually
         sel = select(tbl.c.conformer_id).where(
             tbl.c.species_id == species_id,
             tbl.c.geometry_hash == geometry_hash,
             tbl.c.lot_id == lot_id,
         )
         res2 = session.execute(sel).first()
-    return (res2[0] if res2 else None), True
-    return result.conformer_id, result.geometry_hash
+
+    return (res2[0] if res2 else None), True  # merged==True if we reused
 
 
 def upsert_ts_features(session, conformer_id: int, lot_id: int, fields: dict):
@@ -768,15 +813,19 @@ def upsert_ts_features(session, conformer_id: int, lot_id: int, fields: dict):
     session.execute(stmt)
 
 
-def ensure_atom_role(session, atom_id: int | None, role: str) -> None:
-    """Insert (atom_id, role) into atom_role_map if missing."""
-    if not atom_id or not role:
+def ensure_participant_atom_role(
+    session, participant_id: int | None, atom_idx: int | None, role: str
+) -> None:
+    """Insert a participant-scoped atom role if missing."""
+    if not participant_id or atom_idx is None or role is None:
         return
-    tbl = AtomRoleMap.__table__
+    tbl = ParticipantAtomRole.__table__
     stmt = (
         pg_insert(tbl)
-        .values(atom_id=atom_id, role=role)
-        .on_conflict_do_nothing(index_elements=[tbl.c.atom_id, tbl.c.role])
+        .values(participant_id=participant_id, atom_idx=atom_idx, role=role)
+        .on_conflict_do_nothing(
+            index_elements=[tbl.c.participant_id, tbl.c.atom_idx, tbl.c.role]
+        )
     )
     session.execute(stmt)
 
@@ -897,14 +946,25 @@ def _merge_kinetics(session: Session, reaction_id: int, row: dict):
     return rm
 
 
-def link_participant(session, reaction_id: int, conformer_id: int, role: str):
+def link_participant(session, reaction_id: int, conformer_id: int, role: str) -> int:
     tbl = ReactionParticipant.__table__
     stmt = (
         pg_insert(tbl)
         .values(reaction_id=reaction_id, conformer_id=conformer_id, role=role)
         .on_conflict_do_nothing()
+        .returning(tbl.c.participant_id)
     )
-    session.execute(stmt)
+    inserted = session.execute(stmt).scalar_one_or_none()
+    if inserted is not None:
+        return inserted
+
+    q = select(tbl.c.participant_id).where(
+        tbl.c.reaction_id == reaction_id,
+        tbl.c.conformer_id == conformer_id,
+        tbl.c.role == role,
+    )
+    existing = session.execute(q).scalar_one()
+    return existing
 
 
 def get_or_create_lot(
@@ -976,8 +1036,17 @@ def load_all(
             batch = None
 
         for trip in iter_triplets(
-            sdf_path, strict_roles=strict_roles, sanitize=sanitize
+            sdf_path,
+            strict_roles=strict_roles,
+            sanitize=sanitize,
+            order_hint=ALL_ROLES,
         ):
+            present_roles = set(trip.records)
+            missing_new_roles = {"R1", "R2"} - present_roles
+            if missing_new_roles:
+                raise ValueError(
+                    f"Reaction '{trip.reaction_name or 'unnamed'}' missing roles: {sorted(missing_new_roles)}"
+                )
             stats["dropped_conformers"] = []
             rxn_name = trip.reaction_name or "unnamed_rxn"
             if (
@@ -1008,9 +1077,11 @@ def load_all(
                 reaction.reaction_id = -1  # sentinel
 
             role_to_idx2id: Dict[str, Dict[int, int]] = {}
+            participant_id_by_role: Dict[str, int] = {}
             conf_id_by_role: Dict[str, int] = {}
             stats["reactions_seen"] += 1
             # Insert Molecules + Atoms (XYZ)
+            mol_by_role: Dict[str, Chem.Mol] = {}
             for role, rec in trip.records.items():
                 rmol = Chem.MolFromMolBlock(
                     rec.molblock, sanitize=sanitize, removeHs=False
@@ -1032,6 +1103,7 @@ def load_all(
                 if not lot_method:
                     lot_method, lot_basis, lot_solvent = "unknown", None, None
                 lot_id = get_or_create_lot(session, lot_method, lot_basis, lot_solvent)
+                mol_by_role[role] = rmol
                 if not dry_run:
                     is_ts = rec.role.upper() == "TS"
                     species_id = upsert_species(
@@ -1049,7 +1121,7 @@ def load_all(
                         session,
                         species_id=species_id,
                         lot_id=lot_id,
-                        mol_rdkit_smiles=smiles,
+                        rd_mol=rmol,
                         geometry_hash=ghash,
                         well_label=rec.props.get("well_label"),
                         is_ts=is_ts,
@@ -1074,12 +1146,13 @@ def load_all(
                         )
                         > 0
                     )
-                    link_participant(
+                    participant_id = link_participant(
                         session,
                         reaction_id=reaction.reaction_id,
                         conformer_id=conformer_id,
                         role=rec.role,
                     )
+                    participant_id_by_role[role] = participant_id
                     stats["molecules_upserted"] += 1
                     if is_ts:
                         ts_fields = _extract_ts_fields(rec.props or {})
@@ -1163,14 +1236,19 @@ def load_all(
                             idx2id[a.atom_idx] = a.atom_id
 
                 role_to_idx2id[role] = idx2id
-                # AtomRoleMap from mol_properties
+                # Participant-scoped atom-role map from mol_properties
                 mp = rec.mol_properties or {}
                 for i_idx, rname in _mol_properties_to_roles(mp).items():
                     if (
                         rname in {"donor", "acceptor", "d_hydrogen", "a_hydrogen"}
                         and not dry_run
                     ):
-                        ensure_atom_role(session, idx2id.get(i_idx), rname)
+                        ensure_participant_atom_role(
+                            session,
+                            participant_id_by_role.get(role),
+                            i_idx,
+                            rname,
+                        )
 
             for row in kin_index.get(rxn_name, []):
                 if not dry_run:
@@ -1303,9 +1381,10 @@ def load_all(
                 )
                 map_triplet_key_atoms(
                     session,
-                    conf_id_by_role=conf_id_by_role,
                     idx2id_by_role=role_to_idx2id,
+                    participant_id_by_role=participant_id_by_role,
                     ts_props=ts_props,
+                    mol_by_role=mol_by_role,
                 )
 
             # Commit per reaction
@@ -1335,7 +1414,10 @@ def main():
         description="Load SDF triplets (+ optional CSV) into the DB in one pass."
     )
     p.add_argument(
-        "--sdf", required=True, type=Path, help="Path to SDF with triplets (R1H,R2H,TS)"
+        "--sdf",
+        required=True,
+        type=Path,
+        help="Path to SDF with grouped records (R1H,R2H,TS,R1,R2)",
     )
     p.add_argument(
         "--source-label", required=True, help="Provenance label stored in ingest_batch"

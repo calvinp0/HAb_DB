@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import {
   Card,
   CardContent,
@@ -49,6 +49,7 @@ export type CpViewerProps = {
   lotString?: string;
   curve?: CPCurve | null;
   polynomials?: NASA7[] | null;
+  active?: boolean;
 };
 
 // ---- Constants ----
@@ -207,6 +208,7 @@ export default function CpCurveViewer({
   lotString,
   curve,
   polynomials,
+  active = true,
 }: CpViewerProps) {
   // Fallback sample (small NH fragment) to keep the component previewable
   const samplePolys: NASA7[] = [
@@ -268,6 +270,11 @@ export default function CpCurveViewer({
   const [unit, setUnit] = useState<Unit>("J");
   const [showRaw, setShowRaw] = useState(true);
   const [showFit, setShowFit] = useState(true);
+  const [chartsEnabled, setChartsEnabled] = useState<boolean>(active);
+
+  useEffect(() => {
+    setChartsEnabled(active);
+  }, [active]);
 
   // const units = useCal ? "cal/(mol·K)" : "J/(mol·K)";
   const units = unitLabel(unit);
@@ -365,6 +372,8 @@ export default function CpCurveViewer({
     [polys],
   );
 
+  const renderCharts = chartsEnabled;
+
   const title = speciesLabel ?? "Species";
   const subtitle = lotString
     ? `Level of Theory: ${lotString}`
@@ -444,118 +453,134 @@ export default function CpCurveViewer({
               </label>
             </div>
             <div className="h-[380px] w-full">
-              <ResponsiveContainer>
-                <LineChart
-                  data={chartData}
-                  margin={{ top: 10, right: 24, left: 8, bottom: 8 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="T"
-                    type="number"
-                    domain={[Tmin, Tmax]}
-                    tickFormatter={(v) => `${Math.round(v)}`}
-                    label={{
-                      value: "T (K)",
-                      position: "insideBottom",
-                      offset: -2,
-                    }}
-                  />
-                  <YAxis
-                    yAxisId={0}
-                    domain={[ymin, ymax]}
-                    allowDecimals
-                    tickFormatter={(v) => formatTick(v as number, cpDecimals)}
-                    label={{ value: units, angle: -90, position: "insideLeft" }}
-                  />
-                  {segBands.map((s, i) => (
-                    <ReferenceArea
-                      key={i}
-                      x1={s.Tmin_K}
-                      x2={s.Tmax_K}
-                      y1={0}
-                      y2={1}
+              {renderCharts ? (
+                <ResponsiveContainer>
+                  <LineChart
+                    data={chartData}
+                    margin={{ top: 10, right: 24, left: 8, bottom: 8 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="T"
+                      type="number"
+                      domain={[Tmin, Tmax]}
+                      tickFormatter={(v) => `${Math.round(v)}`}
+                      label={{
+                        value: "T (K)",
+                        position: "insideBottom",
+                        offset: -2,
+                      }}
+                    />
+                    <YAxis
                       yAxisId={0}
-                      ifOverflow="extendDomain"
-                      fill={i % 2 ? "#e5e7eb" : "#f9fafb"}
-                      fillOpacity={0.45}
-                      strokeOpacity={0}
+                      domain={[ymin, ymax]}
+                      allowDecimals
+                      tickFormatter={(v) => formatTick(v as number, cpDecimals)}
+                      label={{
+                        value: units,
+                        angle: -90,
+                        position: "insideLeft",
+                      }}
                     />
-                  ))}
-                  <Tooltip content={<ChartTooltip units={units} />} />
-                  <Legend />
-                  {showRaw && (
-                    <Line
-                      type="monotone"
-                      dataKey="cp_raw"
-                      name="Cp raw"
-                      stroke="#2563eb"
-                      dot={true}
-                      strokeWidth={2}
-                      isAnimationActive={false}
-                    />
-                  )}
-                  {showFit && (
-                    <Line
-                      type="monotone"
-                      dataKey="cp_fit"
-                      name="Cp NASA7"
-                      stroke="#16a34a"
-                      dot={false}
-                      strokeWidth={2}
-                    />
-                  )}
-                </LineChart>
-              </ResponsiveContainer>
+                    {segBands.map((s, i) => (
+                      <ReferenceArea
+                        key={i}
+                        x1={s.Tmin_K}
+                        x2={s.Tmax_K}
+                        y1={0}
+                        y2={1}
+                        yAxisId={0}
+                        ifOverflow="extendDomain"
+                        fill={i % 2 ? "#e5e7eb" : "#f9fafb"}
+                        fillOpacity={0.45}
+                        strokeOpacity={0}
+                      />
+                    ))}
+                    <Tooltip content={<ChartTooltip units={units} />} />
+                    <Legend />
+                    {showRaw && (
+                      <Line
+                        type="monotone"
+                        dataKey="cp_raw"
+                        name="Cp raw"
+                        stroke="#2563eb"
+                        dot={true}
+                        strokeWidth={2}
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {showFit && (
+                      <Line
+                        type="monotone"
+                        dataKey="cp_fit"
+                        name="Cp NASA7"
+                        stroke="#16a34a"
+                        dot={false}
+                        strokeWidth={2}
+                      />
+                    )}
+                  </LineChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
+                  Open the Thermo tab to render Cp curves.
+                </div>
+              )}
             </div>
           </TabsContent>
 
           <TabsContent value="resid" className="mt-4">
             <div className="h-[320px] w-full">
-              <ResponsiveContainer>
-                <LineChart
-                  data={residuals}
-                  margin={{ top: 10, right: 24, left: 8, bottom: 8 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="T"
-                    type="number"
-                    domain={[Tmin, Tmax]}
-                    tickFormatter={(v) => `${Math.round(v)}`}
-                    label={{
-                      value: "T (K)",
-                      position: "insideBottom",
-                      offset: -2,
-                    }}
-                  />
-                  <YAxis
-                    domain={[rmin, rmax]}
-                    allowDecimals
-                    tickFormatter={(v) =>
-                      formatTick(v as number, residDecimals)
-                    }
-                    label={{
-                      value: `ΔCp (${units})`,
-                      angle: -90,
-                      position: "insideLeft",
-                    }}
-                  />
-                  <Tooltip
-                    formatter={(v: number) => v.toFixed(3)}
-                    labelFormatter={(l) => `T = ${l} K`}
-                  />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="resid"
-                    name="raw − fit"
-                    stroke="#ef4444"
-                    dot={false}
-                    strokeWidth={2}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+              {renderCharts ? (
+                <ResponsiveContainer>
+                  <LineChart
+                    data={residuals}
+                    margin={{ top: 10, right: 24, left: 8, bottom: 8 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="T"
+                      type="number"
+                      domain={[Tmin, Tmax]}
+                      tickFormatter={(v) => `${Math.round(v)}`}
+                      label={{
+                        value: "T (K)",
+                        position: "insideBottom",
+                        offset: -2,
+                      }}
+                    />
+                    <YAxis
+                      domain={[rmin, rmax]}
+                      allowDecimals
+                      tickFormatter={(v) =>
+                        formatTick(v as number, residDecimals)
+                      }
+                      label={{
+                        value: `ΔCp (${units})`,
+                        angle: -90,
+                        position: "insideLeft",
+                      }}
+                    />
+                    <Tooltip
+                      formatter={(v: number) => v.toFixed(3)}
+                      labelFormatter={(l) => `T = ${l} K`}
+                    />
+                    <Legend />
+                    <Line
+                      type="monotone"
+                      dataKey="resid"
+                      name="raw − fit"
+                      stroke="#ef4444"
+                      dot={false}
+                      strokeWidth={2}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
+                  Open the Thermo tab to render residuals.
+                </div>
+              )}
             </div>
           </TabsContent>
         </Tabs>

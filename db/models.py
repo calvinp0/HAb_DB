@@ -149,8 +149,10 @@ class ExternalIdentifier(TimeStampMixin, Base):
     )
 
 
+
 class Conformer(TimeStampMixin, Base):
     __tablename__ = "conformer"
+
     conformer_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     species_id: Mapped[int] = mapped_column(
         ForeignKey("species.species_id", ondelete="CASCADE"), index=True, nullable=False
@@ -168,8 +170,11 @@ class Conformer(TimeStampMixin, Base):
     )
     is_ts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
-    # store a canonical RDKit mol (rdkit type column)
+    # Canonical RDKit mol (Postgres rdkit 'mol' type) → heavy-atom representation
     mol: Mapped[object] = mapped_column(Mol, nullable=False)
+
+    # Raw CTAB with explicit H and original geometry
+    mol_raw_ctab: Mapped[Optional[str]] = mapped_column(Text)
 
     __table_args__ = (
         UniqueConstraint(
@@ -323,35 +328,65 @@ class ConformerAtom(TimeStampMixin, Base):
     )
 
     conformer: Mapped["Conformer"] = relationship(back_populates="atoms")
-    roles: Mapped[List["AtomRoleMap"]] = relationship(
-        back_populates="atom", cascade="all, delete-orphan"
-    )
+    # Atom roles now live on reaction participants to allow the same
+    # geometry to be reused across roles safely.
 
 
-class AtomRoleMap(TimeStampMixin, Base):
-    __tablename__ = "atom_role_map"
-    atom_id: Mapped[int] = mapped_column(
-        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), primary_key=True
+class ParticipantAtomRole(TimeStampMixin, Base):
+    __tablename__ = "participant_atom_role"
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("reaction_participant.participant_id", ondelete="CASCADE"),
+        primary_key=True,
     )
+    atom_idx: Mapped[int] = mapped_column(Integer, primary_key=True)
     role: Mapped[str] = mapped_column(AtomRole, primary_key=True)
-    atom: Mapped["ConformerAtom"] = relationship(back_populates="roles")
+
+    participant: Mapped["ReactionParticipant"] = relationship(
+        back_populates="atom_roles"
+    )
 
 
-class AtomMapToTS(TimeStampMixin, Base):
+# Backwards-compatible alias for older imports.
+AtomRoleMap = ParticipantAtomRole
+
+
+class AtomMapToTS(Base):
     __tablename__ = "atom_map_to_ts"
-    ts_conformer_id: Mapped[int] = mapped_column(
-        ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
-    )
-    from_conformer_id: Mapped[int] = mapped_column(
-        ForeignKey("conformer.conformer_id", ondelete="CASCADE"), primary_key=True
-    )
-    from_atom_id: Mapped[int] = mapped_column(
-        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), primary_key=True
-    )
+
     ts_atom_id: Mapped[int] = mapped_column(
-        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"),
+        primary_key=True,
     )
 
+    src_atom_id: Mapped[int] = mapped_column(
+        ForeignKey("conformer_atom.atom_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("reaction_participant.participant_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    ts_atom: Mapped["ConformerAtom"] = relationship(
+        "ConformerAtom",
+        foreign_keys=[ts_atom_id],
+        backref="mapped_to_ts",
+        cascade="all, delete",
+    )
+
+    src_atom: Mapped["ConformerAtom"] = relationship(
+        "ConformerAtom",
+        foreign_keys=[src_atom_id],
+        backref="mapped_from_src",
+        cascade="all, delete",
+    )
+
+    participant: Mapped["ReactionParticipant"] = relationship(
+        "ReactionParticipant",
+        backref="atom_maps",
+        cascade="all, delete",
+    )
 
 class GeomDistance(TimeStampMixin, Base):
     __tablename__ = "geom_distance"
@@ -488,6 +523,9 @@ class ReactionParticipant(TimeStampMixin, Base):
 
     reaction: Mapped["Reaction"] = relationship(back_populates="participants")
     conformer: Mapped["Conformer"] = relationship()
+    atom_roles: Mapped[List["ParticipantAtomRole"]] = relationship(
+        back_populates="participant", cascade="all, delete-orphan"
+    )
 
 
 class RateModel(TimeStampMixin, Base):

@@ -1,7 +1,7 @@
 from collections import Counter
 import json
 import math
-from typing import Optional, List
+from typing import Optional, List, Dict
 from rdkit import Chem
 
 R_J_MOLK = 8.31446261815324
@@ -301,7 +301,7 @@ def _to_J_per_molK(value: Optional[float], units: Optional[str]) -> Optional[flo
 from typing import Optional, Dict
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import select
-from db.models import ConformerAtom, AtomRoleMap, AtomMapToTS
+from db.models import ParticipantAtomRole, AtomMapToTS
 
 
 def _coerce_mol_properties(mp_any) -> dict:
@@ -354,75 +354,173 @@ def find_ts_star(ts_props, star_label: str):
     return None
 
 
-def first_atom_id_with_role(
-    session, conformer_id: int, role_name: str
+def first_atom_idx_with_role(
+    session, participant_id: Optional[int], role_name: str
 ) -> Optional[int]:
+    if not participant_id or not role_name:
+        return None
     q = (
-        select(ConformerAtom.atom_id)
-        .join(AtomRoleMap, AtomRoleMap.atom_id == ConformerAtom.atom_id)
+        select(ParticipantAtomRole.atom_idx)
         .where(
-            ConformerAtom.conformer_id == conformer_id, AtomRoleMap.role == role_name
+            ParticipantAtomRole.participant_id == participant_id,
+            ParticipantAtomRole.role == role_name,
         )
+        .order_by(ParticipantAtomRole.atom_idx)
     )
     return session.scalars(q).first()
 
 
 def upsert_atom_map_row(
     session,
-    ts_conf_id: int,
-    from_conf_id: int,
-    from_atom_id: Optional[int],
     ts_atom_id: Optional[int],
+    src_atom_id: Optional[int],
+    participant_id: Optional[int],
 ) -> None:
-    if not (from_atom_id and ts_atom_id):
+    """Insert one mapping row between a TS atom and a source atom belonging to a participant."""
+    if not (ts_atom_id and src_atom_id and participant_id):
         return
+
     tbl = AtomMapToTS.__table__
     stmt = (
         pg_insert(tbl)
         .values(
-            ts_conformer_id=ts_conf_id,
-            from_conformer_id=from_conf_id,
-            from_atom_id=from_atom_id,
             ts_atom_id=ts_atom_id,
+            src_atom_id=src_atom_id,
+            participant_id=participant_id,
         )
         .on_conflict_do_nothing()
     )
     session.execute(stmt)
 
+# def find_ts_star(ts_props: dict, label: str) -> Optional[int]:
+#     """Return TS atom_idx (int) whose label matches '*0','*1',..."""
+#     for k, v in ts_props.items():
+#         try:
+#             idx = int(k)
+#         except Exception:
+#             continue
+#         if str(v.get("label", "")).strip() == label:
+#             return idx
+#     return None
+
+def find_neighbor_non_H(mol, atom_idx, exclude_idx=None):
+    a = mol.GetAtomWithIdx(atom_idx)
+    for nb in a.GetNeighbors():
+        i = nb.GetIdx()
+        if nb.GetAtomicNum() != 1 and i != exclude_idx:
+            return i
+    return None
+
+
+
+
+def _neighbor_candidates_matching_Z(mol, center_idx, target_Z, exclude_idxs=None):
+    if mol is None or center_idx is None or target_Z is None:
+        return []
+    if exclude_idxs is None:
+        exclude_idxs = set()
+    else:
+        exclude_idxs = set(exclude_idxs)
+
+    a = mol.GetAtomWithIdx(center_idx)
+    cands = []
+    for nb in a.GetNeighbors():
+        i = nb.GetIdx()
+        if i in exclude_idxs:
+            continue
+        if nb.GetAtomicNum() == target_Z:
+            cands.append(i)
+    return cands
+
 
 def map_triplet_key_atoms(
     session,
-    conf_id_by_role: Dict[str, int],
     idx2id_by_role: Dict[str, Dict[int, int]],
+    participant_id_by_role: Dict[str, int],
     ts_props: dict,
+    mol_by_role: Optional[Dict[str, Chem.Mol]] = None,
 ) -> None:
-    """Anchor mappings: donor (*1), migrating H (*2), acceptor (*3)."""
-    ts_conf = conf_id_by_role.get("TS")
-    r1_conf = conf_id_by_role.get("R1H")
-    r2_conf = conf_id_by_role.get("R2H")
-    ts_idx2id = idx2id_by_role.get("TS", {})
+    """Anchor mappings: *1(donor), *2(H), *3(acceptor), plus infer *0/*4 neighbors."""
 
-    # find TS star indices -> atom_id
+    mol_by_role = mol_by_role or {}
+    ts_mol = mol_by_role.get("TS")
+    r1_mol = mol_by_role.get("R1H")
+    r2_mol = mol_by_role.get("R2H")
+
+    ts_idx2id = idx2id_by_role.get("TS", {})
+    r1_idx_map = idx2id_by_role.get("R1H", {})
+    r2_idx_map = idx2id_by_role.get("R2H", {})
+
+    r1_part = participant_id_by_role.get("R1H")
+    r2_part = participant_id_by_role.get("R2H")
+
+    # --- TS star indices (by atom_idx) ---
     ts_star1 = find_ts_star(ts_props, "*1")
     ts_star2 = find_ts_star(ts_props, "*2")
     ts_star3 = find_ts_star(ts_props, "*3")
+    ts_star0 = find_ts_star(ts_props, "*0")
+    ts_star4 = find_ts_star(ts_props, "*4")
+
     ts_star1_id = ts_idx2id.get(ts_star1) if ts_star1 is not None else None
     ts_star2_id = ts_idx2id.get(ts_star2) if ts_star2 is not None else None
     ts_star3_id = ts_idx2id.get(ts_star3) if ts_star3 is not None else None
+    ts_star0_id = ts_idx2id.get(ts_star0) if ts_star0 is not None else None
+    ts_star4_id = ts_idx2id.get(ts_star4) if ts_star4 is not None else None
 
-    # donor/acceptor/migrating H on R1H/R2H
-    r1_donor = first_atom_id_with_role(session, r1_conf, "donor")
-    r1_dH = first_atom_id_with_role(session, r1_conf, "d_hydrogen")
-    r2_acceptor = first_atom_id_with_role(session, r2_conf, "acceptor")
-    r2_aH = first_atom_id_with_role(session, r2_conf, "a_hydrogen")
+    # --- donor / acceptor / H in reactants (by atom_idx) ---
+    r1_donor_idx = first_atom_idx_with_role(session, r1_part, "donor")
+    r1_dH_idx = first_atom_idx_with_role(session, r1_part, "d_hydrogen")
+    r2_acceptor_idx = first_atom_idx_with_role(session, r2_part, "acceptor")
+    r2_aH_idx = first_atom_idx_with_role(session, r2_part, "a_hydrogen")
 
-    # insert anchor rows (idempotent)
-    upsert_atom_map_row(session, ts_conf, r1_conf, r1_donor, ts_star1_id)
-    upsert_atom_map_row(session, ts_conf, r2_conf, r2_acceptor, ts_star3_id)
-    upsert_atom_map_row(session, ts_conf, r1_conf, r1_dH, ts_star2_id)
-    upsert_atom_map_row(session, ts_conf, r2_conf, r2_aH, ts_star2_id)
+    # --- reactant atom_ids ---
+    r1_donor_id = r1_idx_map.get(r1_donor_idx) if r1_donor_idx is not None else None
+    r1_dH_id = r1_idx_map.get(r1_dH_idx) if r1_dH_idx is not None else None
+    r2_acceptor_id = (
+        r2_idx_map.get(r2_acceptor_idx) if r2_acceptor_idx is not None else None
+    )
+    r2_aH_id = r2_idx_map.get(r2_aH_idx) if r2_aH_idx is not None else None
 
+    # --- Core anchors: *1, *2, *3 ---
+    upsert_atom_map_row(session, ts_atom_id=ts_star1_id, src_atom_id=r1_donor_id, participant_id=r1_part)
+    upsert_atom_map_row(session, ts_atom_id=ts_star3_id, src_atom_id=r2_acceptor_id, participant_id=r2_part)
 
+    # migrating H (*2) appears in both R1H and R2H
+    upsert_atom_map_row(session, ts_atom_id=ts_star2_id, src_atom_id=r1_dH_id, participant_id=r1_part)
+    upsert_atom_map_row(session, ts_atom_id=ts_star2_id, src_atom_id=r2_aH_id, participant_id=r2_part)
+
+    # --- Infer *0 on R1H: neighbor of donor matching TS *0 element ---
+    if ts_mol and r1_mol and ts_star0 is not None and ts_star0_id and r1_donor_idx is not None:
+        ts0_Z = ts_mol.GetAtomWithIdx(ts_star0).GetAtomicNum()
+        # avoid migrating H
+        exclude = {r1_dH_idx} if r1_dH_idx is not None else set()
+        cands = _neighbor_candidates_matching_Z(r1_mol, r1_donor_idx, ts0_Z, exclude)
+        if cands:
+            # pick first; if multiple possible, they’re symmetry-equivalent for our purposes
+            r1_star0_idx = cands[0]
+            r1_star0_id = r1_idx_map.get(r1_star0_idx)
+            upsert_atom_map_row(
+                session,
+                ts_atom_id=ts_star0_id,
+                src_atom_id=r1_star0_id,
+                participant_id=r1_part,
+            )
+
+    # --- Infer *4 on R2H: neighbor of acceptor matching TS *4 element ---
+    if ts_mol and r2_mol and ts_star4 is not None and ts_star4_id and r2_acceptor_idx is not None:
+        ts4_Z = ts_mol.GetAtomWithIdx(ts_star4).GetAtomicNum()
+        exclude = {r2_aH_idx} if r2_aH_idx is not None else set()
+        cands = _neighbor_candidates_matching_Z(r2_mol, r2_acceptor_idx, ts4_Z, exclude)
+        if cands:
+            r2_star4_idx = cands[0]
+            r2_star4_id = r2_idx_map.get(r2_star4_idx)
+            upsert_atom_map_row(
+                session,
+                ts_atom_id=ts_star4_id,
+                src_atom_id=r2_star4_id,
+                participant_id=r2_part,
+            )
+    
 def _composition_and_heavy_atoms(mol: Chem.Mol) -> tuple[dict, int]:
     """
     Return ({'C': nC, 'H': nH, ...}, heavy_atoms_count).

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select, exists, and_
+from sqlalchemy import select, exists, and_, inspect
 
 from sqlalchemy.orm import Session
 from db.models import (
@@ -93,7 +93,10 @@ def relabel_conformers_for_species_lot(session: Session, species_id: int, lot_id
             rep_conf.is_well_representative = True
 
         for j, (c, _) in enumerate(bucket, start=1):
-            label = base if len(bucket) == 1 else f"{base}_{chr(96 + j)}"
+            if len(bucket) == 1:
+                label = base
+            else:
+                label = f"{base}_{j:03d}"
             c.well_rank = rank
             c.well_label = _ascii_clean(label)
             if hasattr(c, "is_well_representative") and c is not rep_conf:
@@ -106,6 +109,10 @@ def relabel_conformers_for_species_lot(session: Session, species_id: int, lot_id
 
 def relabel_all():
     with session_scope() as s:
+        insp = inspect(s.bind)
+        if not insp.has_table("conformer"):
+            print("[relabel] conformer table missing; skipping relabel task")
+            return
         rows = s.execute(
             select(Conformer.species_id, Conformer.lot_id).distinct()
         ).all()
@@ -130,6 +137,14 @@ def backfill_atom_maps(dry_run: bool = False) -> None:
     For each, reconstruct conformer/atom mapping and call map_triplet_key_atoms().
     """
     with session_scope() as session:
+        insp = inspect(session.bind)
+        needed = {"reaction", "reaction_participant", "conformer", "conformer_atom"}
+        missing = [tbl for tbl in needed if not insp.has_table(tbl)]
+        if missing:
+            print(
+                f"[atom-map] required tables missing ({', '.join(missing)}); skipping task"
+            )
+            return
         q = select(Reaction).order_by(Reaction.reaction_id)
         reactions = session.scalars(q).all()
         print(f"Found {len(reactions)} reactions")
@@ -139,6 +154,7 @@ def backfill_atom_maps(dry_run: bool = False) -> None:
             # gather conformers by role
             conf_id_by_role: dict[str, int] = {}
             idx2id_by_role: dict[str, dict[int, int]] = {}
+            participant_id_by_role: dict[str, int] = {}
 
             parts = session.scalars(
                 select(ReactionParticipant).where(
@@ -151,6 +167,7 @@ def backfill_atom_maps(dry_run: bool = False) -> None:
                 if not conf:
                     continue
                 conf_id_by_role[role] = conf.conformer_id
+                participant_id_by_role[role] = p.participant_id
 
                 # build index: atom_idx -> atom_id
                 idx2id: dict[int, int] = {}
@@ -177,8 +194,8 @@ def backfill_atom_maps(dry_run: bool = False) -> None:
             if not dry_run:
                 map_triplet_key_atoms(
                     session,
-                    conf_id_by_role=conf_id_by_role,
                     idx2id_by_role=idx2id_by_role,
+                    participant_id_by_role=participant_id_by_role,
                     ts_props=ts_props,
                 )
                 updated += 1
@@ -201,6 +218,11 @@ def backfill_missing_G298(
     """
     updated = 0
     with session_scope() as session:
+        insp = inspect(session.bind)
+        needed = {"conformer", "well_features"}
+        if any(not insp.has_table(tbl) for tbl in needed):
+            print("[g298] required tables missing; skipping task")
+            return 0
         # fetch rows that either have G298 missing or G298_units not set to kJ/mol
         q = select(WellFeatures).where(
             (WellFeatures.G298.is_(None))

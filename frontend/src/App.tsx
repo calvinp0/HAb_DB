@@ -44,6 +44,7 @@ const API_BASE = new URL(
   (import.meta as any).env?.VITE_API_BASE ?? "/api/",
   window.location.origin,
 );
+const DOWNLOAD_URL = new URL("downloads/reactions.zip", API_BASE).toString();
 
 // ----- Types that mirror your FastAPI response models -----
 export interface SpeciesOut {
@@ -253,6 +254,13 @@ function ElementPicker({
 }
 
 type Mode = "molecules" | "reactions" | "ts";
+type ConformerSortKey =
+  | "lot"
+  | "well_label"
+  | "well_rank"
+  | "is_ts"
+  | "is_well_representative"
+  | EnergyKey;
 
 export default function App({ initialMode = "molecules" as Mode }) {
   /**
@@ -310,6 +318,10 @@ export default function App({ initialMode = "molecules" as Mode }) {
   const HEAVY_ATOM_CAP = 80;
   const [maxHeavy, setMaxHeavy] = useState<number>(HEAVY_ATOM_CAP);
   const [explicitSmiles, setExplicitSmiles] = useState(false);
+  const [structureMode, setStructureMode] = useState<
+    "auto" | "smarts" | "inchi"
+  >("auto");
+  const [requireStereo, setRequireStereo] = useState(false);
   const COMMON_ELEMENTS = [
     "C",
     "N",
@@ -341,6 +353,45 @@ export default function App({ initialMode = "molecules" as Mode }) {
   const [lotId, setLotId] = useState<string | null>(null);
   const [selectedLot, setSelectedLot] = useState<string>("__ALL__");
   const [wellRank, setWellRank] = useState<number | null>(null);
+  const [wellRankOptions, setWellRankOptions] = useState<number[]>([]);
+  const [confSort, setConfSort] = useState<{
+    key: ConformerSortKey;
+    dir: "asc" | "desc";
+  }>({ key: "lot", dir: "asc" });
+  const setSort = (key: ConformerSortKey) => {
+    setConfSort((prev) => {
+      if (prev.key === key) {
+        return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
+      }
+      return { key, dir: "asc" };
+    });
+  };
+  const ENERGY_DESCRIPTIONS: Record<EnergyKey, string> = {
+    G298: "Gibbs free energy at 298 K (kJ/mol) when available.",
+    H298: "Enthalpy at 298 K (kJ/mol).",
+    E0: "E_elec + ZPE (kJ/mol).",
+    E_elec: "Electronic energy (kJ/mol).",
+    ZPE: "Zero-point energy (kJ/mol).",
+    E_TS: "Barrier height reported for TS conformers (kJ/mol).",
+  };
+
+  const renderSortHeader = (
+    label: string,
+    key: ConformerSortKey,
+    title?: string,
+  ) => (
+    <button
+      type="button"
+      onClick={() => setSort(key)}
+      className="flex items-center gap-1 font-semibold uppercase tracking-wide text-xs"
+      title={title}
+    >
+      <span>{label}</span>
+      {confSort.key === key && (
+        <span aria-hidden>{confSort.dir === "asc" ? "▲" : "▼"}</span>
+      )}
+    </button>
+  );
   const lotOptions = useMemo(
     () =>
       Array.from(
@@ -353,6 +404,55 @@ export default function App({ initialMode = "molecules" as Mode }) {
     if (selectedLot === "__ALL__") return confs;
     return confs.filter((c) => c.lot?.lot_string === selectedLot);
   }, [confs, selectedLot]);
+  const sortedConfs = useMemo(() => {
+    const arr = [...shownConfs];
+    const isEnergyKey = (k: string): k is EnergyKey =>
+      ENERGY_KEYS.includes(k as EnergyKey);
+    const getVal = (conf: ConformerRow, key: ConformerSortKey) => {
+      switch (key) {
+        case "lot":
+          return conf.lot?.lot_string ?? "";
+        case "well_label": {
+          const label = conf.well_label ?? "";
+          if (!label) return "";
+          if (label === "well") return "well_000";
+          const match = label.match(/^(iso\d+)(?:_(\d+))?$/i);
+          if (match) {
+            const base = match[1].toLowerCase();
+            const suffix = match[2] ? match[2].padStart(3, "0") : "000";
+            return `${base}_${suffix}`;
+          }
+          return label;
+        }
+        case "well_rank":
+          return typeof conf.well_rank === "number"
+            ? conf.well_rank
+            : Number.POSITIVE_INFINITY;
+        case "is_ts":
+          return conf.is_ts ? 1 : 0;
+        case "is_well_representative":
+          return conf.is_well_representative ? 1 : 0;
+        default:
+          if (isEnergyKey(key)) {
+            const val = (conf as any)[key];
+            return typeof val === "number" ? val : Number.POSITIVE_INFINITY;
+          }
+          return conf.conformer_id;
+      }
+    };
+    arr.sort((a, b) => {
+      const aVal = getVal(a, confSort.key);
+      const bVal = getVal(b, confSort.key);
+      let cmp = 0;
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        cmp = aVal === bVal ? 0 : aVal < bVal ? -1 : 1;
+      } else {
+        cmp = String(aVal).localeCompare(String(bVal));
+      }
+      return confSort.dir === "asc" ? cmp : -cmp;
+    });
+    return arr;
+  }, [shownConfs, confSort]);
   // Energy Column Selections
   const [energyOn, setEnergyOn] = useState<Record<EnergyKey, boolean>>({
     G298: true,
@@ -366,9 +466,16 @@ export default function App({ initialMode = "molecules" as Mode }) {
     () => ENERGY_KEYS.filter((k) => energyOn[k]),
     [energyOn],
   );
+  useEffect(() => {
+    if (selectedId == null) {
+      setWellRankOptions([]);
+    }
+  }, [selectedId]);
 
   // Reaction Tab
   const [rxnReactant, setRxnReactant] = useState("");
+  const [rxnReactant2, setRxnReactant2] = useState("");
+  const [fuzzyReactants, setFuzzyReactants] = useState(false);
   const [rxnProduct, setRxnProduct] = useState("");
   const [reactions, setReactions] = useState<ReactionSummaryOut[]>([]);
   const [rxnLoading, setRxnLoading] = useState(false);
@@ -404,7 +511,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
   useEffect(() => {
     setSelectedLot("__ALL__");
     setWellRank(null);
-  }, [selectedId, confs.length]);
+  }, [selectedId]);
 
   // debounce lotId / wellRank for 300ms
   useEffect(() => {
@@ -453,7 +560,9 @@ export default function App({ initialMode = "molecules" as Mode }) {
         setReactions([]);
         const params: Record<string, any> = {
           reactant_q: rxnReactant.trim() || undefined,
+          reactant_q2: rxnReactant2.trim() || undefined,
           product_q: rxnProduct.trim() || undefined,
+          fuzzy_reactants: fuzzyReactants || undefined,
           limit: effLimit,
           offset: effOffset,
         };
@@ -481,8 +590,18 @@ export default function App({ initialMode = "molecules" as Mode }) {
         offset: effOffset,
       };
       if (mode === "molecules") {
-        if (molQ) params.q = molQ;
-        else {
+        if (structureMode !== "auto" && !molQ) {
+          setSearchLoading(false);
+          setError("Provide a query when using SMARTS or InChI mode.");
+          return;
+        }
+
+        if (molQ) {
+          if (structureMode === "smarts") params.smarts = molQ;
+          else if (structureMode === "inchi") params.inchi = molQ;
+          else params.q = molQ;
+          params.require_stereo = requireStereo || undefined;
+        } else {
           if (atoms.length) {
             params.elements = atoms.join(",");
             params.elem_mode = elemMode;
@@ -555,7 +674,18 @@ export default function App({ initialMode = "molecules" as Mode }) {
           throw new Error(
             (body as any)?.detail || `${res.status} ${res.statusText}`,
           );
-        setConfs(body as ConformerRow[]);
+        const rows = body as ConformerRow[];
+        setConfs(rows);
+        if (wellRank === null) {
+          const ranks = Array.from(
+            new Set(
+              rows
+                .map((c) => c.well_rank)
+                .filter((r): r is number => typeof r === "number"),
+            ),
+          ).sort((a, b) => a - b);
+          setWellRankOptions(ranks);
+        }
       } catch (e: any) {
         if (e?.name !== "AbortError") {
           setError(e?.message ?? String(e));
@@ -580,6 +710,11 @@ export default function App({ initialMode = "molecules" as Mode }) {
             <Badge variant="secondary" className="ml-2">
               alpha
             </Badge>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button variant="outline" size="sm" asChild>
+              <a href={DOWNLOAD_URL}>Download dataset</a>
+            </Button>
           </div>
         </div>
       </header>
@@ -626,26 +761,60 @@ export default function App({ initialMode = "molecules" as Mode }) {
               </TabsList>
 
               <TabsContent value="molecules" className="mt-4 space-y-3">
-                {/* SMILES */}
-                <div>
-                  <label className="mb-1 block text-sm font-medium">
-                    SMILES
-                  </label>
+                {/* Structure query */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <label className="block text-sm font-medium flex-1">
+                      Structure Query
+                    </label>
+                    <select
+                      className="rounded-md border border-zinc-300 px-2 py-1 text-sm"
+                      value={structureMode}
+                      onChange={(e) =>
+                        setStructureMode(e.target.value as typeof structureMode)
+                      }
+                    >
+                      <option value="auto">Name / SMILES</option>
+                      <option value="smarts">SMARTS (substructure)</option>
+                      <option value="inchi">InChI</option>
+                    </select>
+                  </div>
                   <Input
                     className={FIELD}
-                    placeholder="e.g. CC(=O)O"
+                    placeholder={
+                      structureMode === "smarts"
+                        ? "e.g. [OH]C=O"
+                        : structureMode === "inchi"
+                          ? "e.g. InChI=1S/CH4/h1H4"
+                          : "e.g. CC(=O)O or acetone"
+                    }
                     value={q}
                     onChange={(e) => setQ(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && doSearch()}
                   />
-                </div>
-
-                {/* SMARTS placeholder — not used yet */}
-                <div>
-                  <label className="mb-1 block text-sm font-medium">
-                    SMARTS substructure (placeholder)
-                  </label>
-                  <Input className={FIELD} placeholder="e.g. [OH]C=O" />
+                  {structureMode === "smarts" ? (
+                    <p className="text-xs text-slate-500">
+                      SMARTS search matches substructures within canonical SMILES.
+                    </p>
+                  ) : structureMode === "inchi" ? (
+                    <p className="text-xs text-slate-500">
+                      InChI search matches exact structures via InChIKey/SMILES.
+                    </p>
+                  ) : null}
+                  {structureMode !== "smarts" && (
+                    <div className="flex items-center gap-2 text-sm pt-1">
+                      <input
+                        id="require-stereo"
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={requireStereo}
+                        onChange={(e) => setRequireStereo(e.target.checked)}
+                      />
+                      <label htmlFor="require-stereo">
+                        Require stereochemistry match
+                      </label>
+                    </div>
+                  )}
                 </div>
 
                 {/* Chips */}
@@ -746,6 +915,18 @@ export default function App({ initialMode = "molecules" as Mode }) {
                   </div>
                   <div>
                     <label className="mb-1 block text-sm font-medium">
+                      Second Reactant (optional)
+                    </label>
+                    <Input
+                      className={FIELD}
+                      placeholder="e.g. O=O"
+                      value={rxnReactant2}
+                      onChange={(e) => setRxnReactant2(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && doSearch()}
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium">
                       Product (SMILES or name)
                     </label>
                     <Input
@@ -758,8 +939,21 @@ export default function App({ initialMode = "molecules" as Mode }) {
                   </div>
                 </div>
                 <div className="text-xs text-slate-500">
-                  Provide either field or both. If only reactant is provided,
-                  all matching reactions are shown.
+                  Provide one reactant, two reactants, a product, or any
+                  combination. When both reactants are present the results are
+                  limited to reactions that contain both species on the reactant side.
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  <input
+                    id="fuzzy-reactants"
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={fuzzyReactants}
+                    onChange={(e) => setFuzzyReactants(e.target.checked)}
+                  />
+                  <label htmlFor="fuzzy-reactants">
+                    Allow fuzzy reactant match (substring, canonical SMILES only)
+                  </label>
                 </div>
               </TabsContent>
 
@@ -867,8 +1061,11 @@ export default function App({ initialMode = "molecules" as Mode }) {
                   onChange={(e) => {
                     const v = Number(e.target.value);
                     setLimit(v);
-                    setOffset(0);
-                    void doSearch({ limit: v, offset: 0 });
+                    const newOffset = 0;
+                    setOffset(newOffset);
+                    if (reactions.length || species.length || confs.length) {
+                      void doSearch({ limit: v, offset: newOffset });
+                    }
                   }}
                 >
                   <option value={10}>10 / page</option>
@@ -1106,20 +1303,50 @@ export default function App({ initialMode = "molecules" as Mode }) {
                         </option>
                       ))}
                     </select>
-                  </label>
-                  <label className="inline-flex items-center gap-2">
-                    <span>Well rank</span>
-                    <input
-                      type="number"
-                      className="w-28 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
-                      value={wellRank ?? ""}
-                      onChange={(e) =>
-                        setWellRank(
-                          e.target.value ? Number(e.target.value) : null,
-                        )
-                      }
-                    />
-                  </label>
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <span
+                    className="inline-flex items-center gap-1"
+                    title="Rank 1 is the lowest-energy well for this species/LoT. Energy order: prefer G298, then H298, else E0 (E_elec + ZPE). Higher ranks are additional wells within ~1e-4 kJ/mol of each other."
+                  >
+                    Well rank
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="w-3 h-3 text-zinc-400"
+                      aria-hidden="true"
+                    >
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="16" x2="12" y2="12" />
+                      <line x1="12" y1="8" x2="12.01" y2="8" />
+                    </svg>
+                  </span>
+                  <select
+                    className="w-28 rounded-lg border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+                    value={
+                      wellRank != null && wellRankOptions.includes(wellRank)
+                        ? wellRank
+                        : "__ALL__"
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setWellRank(val === "__ALL__" ? null : Number(val));
+                    }}
+                    disabled={wellRankOptions.length === 0}
+                  >
+                    <option value="__ALL__">All ranks</option>
+                    {wellRankOptions.map((rank) => (
+                      <option key={rank} value={rank}>
+                        {rank}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 </div>
 
                 <div className="mb-2 flex flex-wrap items-center gap-3 text-sm">
@@ -1147,21 +1374,51 @@ export default function App({ initialMode = "molecules" as Mode }) {
                 <div className="overflow-x-auto">
                   <table className="w-full border-separate border-spacing-0">
                     <thead>
-                      <tr className="bg-zinc-50 text-xs font-semibold uppercase tracking-wide dark:bg-zinc-900">
-                        <th className="px-3 py-2 text-left">LoT</th>
+                      <tr className="bg-zinc-50 text-xs uppercase tracking-wide dark:bg-zinc-900">
+                        <th
+                          className="px-3 py-2 text-left"
+                          title="Level of theory used for the conformer geometry (method/basis/solvent)."
+                        >
+                          {renderSortHeader("LoT", "lot")}
+                        </th>
                         {selectedEnergyKeys.map((k) => (
-                          <th key={k} className="px-3 py-2 text-left">
-                            {k} (kJ/mol)
+                          <th
+                            key={k}
+                            className="px-3 py-2 text-left"
+                            title={ENERGY_DESCRIPTIONS[k]}
+                          >
+                            {renderSortHeader(`${k} (kJ/mol)`, k)}
                           </th>
                         ))}
-                        <th className="px-3 py-2 text-left">TS</th>
-                        <th className="px-3 py-2 text-left">Well</th>
-                        <th className="px-3 py-2 text-left">Rank</th>
-                        <th className="px-3 py-2 text-left">Rep</th>
+                        <th className="px-3 py-2 text-left">
+                          {renderSortHeader(
+                            "TS",
+                            "is_ts",
+                            "Whether the conformer is a transition state.",
+                          )}
+                        </th>
+                        <th
+                          className="px-3 py-2 text-left"
+                          title="Label assigned to the well/isoenergetic bucket (e.g., well, iso1_a)."
+                        >
+                          {renderSortHeader("Well", "well_label")}
+                        </th>
+                        <th
+                          className="px-3 py-2 text-left"
+                          title="Rank 1 is the lowest-energy well (preferring G298 → H298 → E0). Higher ranks are progressively higher wells within the same species/LoT."
+                        >
+                          {renderSortHeader("Rank", "well_rank")}
+                        </th>
+                        <th
+                          className="px-3 py-2 text-left"
+                          title="Indicates the representative conformer chosen for a well."
+                        >
+                          {renderSortHeader("Rep", "is_well_representative")}
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
-                      {shownConfs.length === 0 ? (
+                      {sortedConfs.length === 0 ? (
                         <tr>
                           <td
                             className="px-3 py-3 text-zinc-500"
@@ -1173,7 +1430,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                           </td>
                         </tr>
                       ) : (
-                        shownConfs.map((c) => (
+                        sortedConfs.map((c) => (
                           <tr
                             key={c.conformer_id}
                             onClick={() =>

@@ -25,7 +25,11 @@ from api.schemas.conformers import (
 )
 from api.schemas.cpcurve import CPCurveOut
 from api.schemas.nasapoly import NASA7Out
-from api.services.chemid import _safe_smiles_no_h
+from api.services.chemid import (
+    _safe_smiles_no_h,
+    adjlist_from_smiles,
+    ServiceUnavailableError,
+)
 
 species_scoped = APIRouter(prefix="/species", tags=["conformers"])
 
@@ -241,6 +245,30 @@ def get_conformer(conformer_id: int, db: Session = Depends(get_db)):
             "E_TS_barrier_kJmol": E_TS_barrier,
         }
     )
+
+
+@conformer_detail.get("/{conformer_id}/adjacency")
+def get_conformer_adjacency(conformer_id: int, db: Session = Depends(get_db)):
+    conformer = db.get(Conformer, conformer_id)
+    if not conformer:
+        raise HTTPException(404, "Conformer not found")
+    if conformer.is_ts:
+        raise HTTPException(400, "Adjacency lists are only available for non-TS conformers")
+
+    species = db.get(Species, conformer.species_id)
+    smiles = getattr(species, "smiles", None) if species else None
+    if not smiles:
+        raise HTTPException(400, "Species is missing a SMILES descriptor")
+
+    try:
+        adj = adjlist_from_smiles(smiles)
+    except ServiceUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not adj:
+        raise HTTPException(502, "Failed to retrieve adjacency list from RMG service")
+
+    return {"adjacency": adj}
 
 
 def _fetch_species_names(db: Session, species_id: int) -> list[dict]:

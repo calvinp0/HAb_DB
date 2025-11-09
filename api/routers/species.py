@@ -14,14 +14,16 @@ from api.schemas.species import (
 )
 from api.services.chemid import (
     canonical_smiles,
+    canonical_smiles_no_stereo,
     validate_inchikey,
     inchikey_from_smiles,
     rd_inchi,
     looks_like_inchikey,
+    looks_like_inchi,
     smiles_without_explicit_h,
 )
 from api.routers.utils import elem_counts_from_smiles, includes_elements
-from sqlalchemy import exists, and_, or_
+from sqlalchemy import exists, and_, or_, func
 
 KCAL_TO_KJ = 4.184
 
@@ -41,6 +43,12 @@ def _safe_inchikey_from_smiles(can: str) -> Optional[str]:
         return inchikey_from_smiles(can)
     except Exception:
         return None
+
+
+def _inchikey_connectivity_block(ik: Optional[str]) -> Optional[str]:
+    if not ik:
+        return None
+    return ik.split("-")[0]
 
 
 def apply_ts_filter(
@@ -164,6 +172,12 @@ def search_species(
     q: Optional[str] = Query(
         None, description="Name or SMILES (InChIKey supported too)"
     ),
+    smarts: Optional[str] = Query(
+        None, description="SMARTS substructure pattern (mutually exclusive with q/inchi)"
+    ),
+    inchi: Optional[str] = Query(
+        None, description="InChI string to match (mutually exclusive with q/smarts)"
+    ),
     db: Session = Depends(get_db),
     include_ts: bool | None = Query(
         None, description="Include transition states (TS) in results"
@@ -185,8 +199,116 @@ def search_species(
     max_heavy_atoms: Optional[int] = Query(None, ge=0),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    require_stereo: bool = Query(
+        False,
+        description="Require stereochemistry to match when searching by SMILES/InChI",
+    ),
 ):
     rows: List[Species] = []
+
+    if q and looks_like_inchi(q):
+        if inchi:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide only one of q, smarts, or inchi for structure searches",
+            )
+        inchi = q.strip()
+        q = None
+
+    if sum(bool(x) for x in (q, smarts, inchi)) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide only one of q, smarts, or inchi for structure searches",
+        )
+
+    # SMARTS substructure search
+    if smarts:
+        pattern = Chem.MolFromSmarts(smarts)
+        if not pattern:
+            raise HTTPException(status_code=400, detail="Invalid SMARTS pattern")
+
+        qry = db.query(Species).filter(Species.smiles.isnot(None))
+        qry = apply_ts_filter(
+            qry,
+            ts_only=ts_only,
+            include_ts=include_ts,
+            require_imag=require_imag,
+            de_min_kcal=de_min_kcal,
+            de_max_kcal=de_max_kcal,
+        ).order_by(Species.species_id.asc())
+
+        matches: List[Species] = []
+        skipped = 0
+        for sp in qry.yield_per(200):
+            try:
+                mol = Chem.MolFromSmiles(sp.smiles or "")
+            except Exception:
+                mol = None
+            if mol and mol.HasSubstructMatch(pattern):
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                matches.append(sp)
+                if len(matches) >= limit:
+                    break
+
+        return _serialize_species_list(matches)
+
+    # InChI search
+    if inchi:
+        if rd_inchi is None:
+            raise HTTPException(
+                status_code=501,
+                detail="RDKit InChI support is unavailable on this server",
+            )
+        try:
+            mol = rd_inchi.MolFromInchi(inchi)
+            if mol is None:
+                raise ValueError("Could not parse InChI")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid InChI: {exc}")
+
+        can = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=True)
+        try:
+            inchi_key = rd_inchi.MolToInchiKey(mol)
+        except Exception:
+            inchi_key = None
+
+        achiral = None
+        try:
+            achiral = canonical_smiles_no_stereo(can)
+        except Exception:
+            achiral = None
+
+        filters = []
+        if inchi_key:
+            block = _inchikey_connectivity_block(inchi_key)
+            if require_stereo:
+                filters.append(Species.inchikey == inchi_key)
+            elif block:
+                filters.append(func.substr(Species.inchikey, 1, 14) == block)
+        if can:
+            filters.append(Species.smiles == can)
+        if not require_stereo and achiral and achiral != can:
+            filters.append(Species.smiles == achiral)
+        if not filters:
+            raise HTTPException(
+                status_code=400, detail="Unable to derive search keys from InChI"
+            )
+
+        qry = db.query(Species).filter(or_(*filters))
+        qry = apply_ts_filter(
+            qry,
+            ts_only=ts_only,
+            include_ts=include_ts,
+            require_imag=require_imag,
+            de_min_kcal=de_min_kcal,
+            de_max_kcal=de_max_kcal,
+        ).order_by(Species.species_id.asc())
+        qry = qry.limit(limit).offset(offset)
+
+        rows = qry.all()
+        return _serialize_species_list(rows)
 
     # ---------- Structure / name search (when q is provided)
     if q and q.strip():
@@ -211,33 +333,30 @@ def search_species(
         # (2) SMILES
         try:
             can = canonical_smiles(query)
+            try:
+                achiral = canonical_smiles_no_stereo(query)
+            except Exception:
+                achiral = None
             ik = None
+            ik_block = None
             if rd_inchi is not None:
                 try:
                     ik = inchikey_from_smiles(can)
+                    ik_block = _inchikey_connectivity_block(ik)
                 except Exception:
                     ik = None
 
+            filters = []
             if ik:
-                qry = db.query(Species).filter(Species.inchikey == ik)
-                qry = apply_ts_filter(
-                    qry,
-                    ts_only=ts_only,
-                    include_ts=include_ts,
-                    require_imag=require_imag,
-                    de_min_kcal=de_min_kcal,
-                    de_max_kcal=de_max_kcal,
-                )
-                rows = (
-                    qry.order_by(Species.species_id.asc())
-                    .offset(offset)
-                    .limit(limit)
-                    .all()
-                )
-                if rows:
-                    return _serialize_species_list(rows)
+                if require_stereo:
+                    filters.append(Species.inchikey == ik)
+                elif ik_block:
+                    filters.append(func.substr(Species.inchikey, 1, 14) == ik_block)
+            filters.append(Species.smiles == can)
+            if not require_stereo and achiral and achiral != can:
+                filters.append(Species.smiles == achiral)
 
-            qry = db.query(Species).filter(Species.smiles == can)
+            qry = db.query(Species).filter(or_(*filters))
             qry = apply_ts_filter(
                 qry,
                 ts_only=ts_only,

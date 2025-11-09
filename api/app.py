@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-from api.routers import species, conformers, reactions
+from api.routers import species, conformers, reactions, downloads
 
 app = FastAPI(title="HAbstraction API")
 
@@ -21,6 +21,7 @@ app.include_router(species.router, prefix="/api")
 app.include_router(conformers.species_scoped, prefix="/api")
 app.include_router(conformers.conformer_detail, prefix="/api")
 app.include_router(reactions.router, prefix="/api")
+app.include_router(downloads.router, prefix="/api")
 
 # ---- Serve the website ----
 app.mount("/", StaticFiles(directory="website", html=True), name="static")
