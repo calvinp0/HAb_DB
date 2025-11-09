@@ -759,21 +759,6 @@ function ReactionCoordinate({
   let eR1 = energyFor(r1);
   let eR2H = energyFor(r2h);
 
-  const singles = [eR1H, eR2, eTS, eR1, eR2H].filter((v): v is number =>
-    Number.isFinite(v as number),
-  );
-  if (singles.length >= 2) {
-    const spread = Math.max(...singles) - Math.min(...singles);
-    if (spread > 5000) {
-      const scale = 1 / 1000;
-      eR1H = Number.isFinite(eR1H as number) ? (eR1H as number) * scale : eR1H;
-      eR2 = Number.isFinite(eR2 as number) ? (eR2 as number) * scale : eR2;
-      eTS = Number.isFinite(eTS as number) ? (eTS as number) * scale : eTS;
-      eR1 = Number.isFinite(eR1 as number) ? (eR1 as number) * scale : eR1;
-      eR2H = Number.isFinite(eR2H as number) ? (eR2H as number) * scale : eR2H;
-    }
-  }
-
   const sumEnergy = (...vals: Array<number | null>) => {
     const finite = vals.filter((v): v is number => Number.isFinite(v as number));
     return finite.length ? finite.reduce((a, b) => a + b, 0) : null;
@@ -794,10 +779,18 @@ function ReactionCoordinate({
   const rel = (v: number | null) =>
     Number.isFinite(v as number) ? (v as number) - zero : null;
 
-  const reactantLabel = [r1h?.well_label || "R1H", r2?.well_label || "R2"]
+  const formatLabel = (role: Participant["role"], label?: string | null) =>
+    label && !/^(?:well|iso)/i.test(label) ? `${role} (${label})` : role;
+  const reactantLabel = [
+    formatLabel("R1H", r1h?.well_label),
+    formatLabel("R2", r2?.well_label),
+  ]
     .filter(Boolean)
     .join(" + ");
-  const productLabel = [r1?.well_label || "R1", r2h?.well_label || "R2H"]
+  const productLabel = [
+    formatLabel("R1", r1?.well_label),
+    formatLabel("R2H", r2h?.well_label),
+  ]
     .filter(Boolean)
     .join(" + ");
 
@@ -837,6 +830,17 @@ function ReactionCoordinate({
       ? (eTS as number) - (eProducts as number)
       : null;
 
+  const yValues = data
+    .map((d) => d.E)
+    .filter((v): v is number => Number.isFinite(v as number));
+  const yMin = yValues.length ? Math.min(...yValues) : -10;
+  const yMax = yValues.length ? Math.max(...yValues) : 10;
+  const padding = Math.max(5, Math.abs(yMax - yMin) * 0.2);
+  const yDomain: [number, number] = [
+    Math.floor((yMin - padding) * 10) / 10,
+    Math.ceil((yMax + padding) * 10) / 10,
+  ];
+
   return (
     <Card>
       <CardHeader>
@@ -856,12 +860,16 @@ function ReactionCoordinate({
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="label" />
               <YAxis
+                width={82}
+                tick={{ dx: -2 }}
                 label={{
                   value: "ΔE [kJ/mol] (relative)",
                   angle: -90,
                   position: "insideLeft",
+                  offset: -12,
+                  style: { textAnchor: "middle" },
                 }}
-                domain={["auto", "auto"]}
+                domain={yDomain}
               />
               <RTooltip
                 formatter={(_v: any, _n: any, p: any) =>
@@ -1111,7 +1119,19 @@ export default function ReactionPage() {
   if (!rxn)
     return <div className="p-6 text-sm text-rose-600">Reaction not found.</div>;
 
-  const title = rxn.reaction_name || `Reaction #${rxn.reaction_id}`;
+  const labelForRole = (role: Participant["role"]) => {
+    const conf = rxn.participants.find((p) => p.role === role)?.conformer;
+    const sp = conf ? speciesById[conf.species_id] : undefined;
+    return sp?.smiles_no_h ?? sp?.smiles ?? `[${conf?.species_id ?? "?"}]`;
+  };
+
+  const reactionTitle = [
+    `${labelForRole("R1H")} + ${labelForRole("R2")}`,
+    "⇌",
+    `${labelForRole("R1")} + ${labelForRole("R2H")}`,
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   // ✅ compute order OUTSIDE JSX
   const reactantCount = rxn.participants.filter(
@@ -1121,10 +1141,17 @@ export default function ReactionPage() {
 
   return (
     <div className="max-w-7xl mx-auto p-4 space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">{title}</h1>
-        <Badge variant="secondary">{rxn.family}</Badge>
-        <div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-xl font-semibold">{reactionTitle}</h1>
+          {rxn.reaction_name && (
+            <span className="text-sm text-muted-foreground">
+              {rxn.reaction_name}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <Badge variant="secondary">{rxn.family}</Badge>
           <BackLink />
         </div>
       </div>
@@ -1135,7 +1162,6 @@ export default function ReactionPage() {
       />
 
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">{title}</h1>
         <div className="flex items-center gap-4">
           <label className="inline-flex items-center gap-2 text-sm">
             <input
