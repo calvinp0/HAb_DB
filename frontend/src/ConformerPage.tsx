@@ -19,7 +19,7 @@ import {
   SelectItem,
   SelectValue,
 } from "@/components/ui/select";
-import { capitalizeWords } from "@/lib/utils";
+import { capitalizeWords, cn } from "@/lib/utils";
 import { ThemeModeToggle } from "@/components/ThemeModeToggle";
 import CpCurveViewer, { CPCurve, NASA7 } from "@/CpNasaViewer";
 
@@ -46,6 +46,8 @@ const isLabelModeOption = (value: string): value is LabelModeOption =>
   LABEL_MODES.includes(value as LabelModeOption);
 
 const DETAIL_ENERGY_KEYS = ["G298", "H298", "E0", "E_elec", "ZPE", "E_TS"] as const;
+type DetailEnergyKey = (typeof DETAIL_ENERGY_KEYS)[number];
+type EnergyOption = { key: string; label: string; value: number };
 
 type ApiErrorBody = { detail?: string };
 const isApiErrorBody = (value: unknown): value is ApiErrorBody =>
@@ -327,12 +329,25 @@ const Dot: React.FC<{ on?: boolean }> = ({ on }) => (
   />
 );
 
-const InfoRow: React.FC<{ label: string; children: React.ReactNode }> = ({
-  label,
-  children,
-}) => (
-  <div className="flex items-start gap-3">
-    <span className="text-slate-500 w-32 shrink-0 whitespace-nowrap">
+const InfoRow: React.FC<{
+  label: React.ReactNode;
+  children: React.ReactNode;
+  alignTop?: boolean;
+  labelClassName?: string;
+}> = ({ label, children, alignTop = false, labelClassName }) => (
+  <div
+    className={cn(
+      "flex gap-3",
+      alignTop ? "items-start" : "items-center",
+      "w-full",
+    )}
+  >
+    <span
+      className={cn(
+        "text-slate-500 w-28 shrink-0 whitespace-nowrap text-sm",
+        labelClassName,
+      )}
+    >
       {label}
     </span>
     <div className="flex-1">{children}</div>
@@ -390,6 +405,44 @@ export default function ConformerPage() {
   const labelsTemporarilyDisabled = style === "line";
   const controlsDisabled = !showLabels || labelsTemporarilyDisabled;
   const [energyDecimals, setEnergyDecimals] = React.useState<number>(6);
+  const keyEnergyOptions = React.useMemo<EnergyOption[]>(() => {
+    if (!data) return [];
+    const baseOptions = DETAIL_ENERGY_KEYS.map((key) => {
+      const raw = data[key as keyof Detail];
+      return Number.isFinite(raw as number)
+        ? { key, label: key, value: raw as number }
+        : null;
+    }).filter(Boolean) as EnergyOption[];
+    if (
+      data.energy_label &&
+      typeof data.energy_value === "number" &&
+      !DETAIL_ENERGY_KEYS.includes(
+        data.energy_label as DetailEnergyKey,
+      )
+    ) {
+      baseOptions.unshift({
+        key: data.energy_label,
+        label: data.energy_label,
+        value: data.energy_value,
+      });
+    }
+    return baseOptions;
+  }, [data]);
+  const [keyEnergyKey, setKeyEnergyKey] = React.useState<string | null>(
+    () => keyEnergyOptions[0]?.key ?? null,
+  );
+  React.useEffect(() => {
+    if (!keyEnergyOptions.length) {
+      if (keyEnergyKey !== null) setKeyEnergyKey(null);
+      return;
+    }
+    if (!keyEnergyKey || !keyEnergyOptions.some((opt) => opt.key === keyEnergyKey)) {
+      setKeyEnergyKey(keyEnergyOptions[0].key);
+    }
+  }, [keyEnergyOptions, keyEnergyKey]);
+  const selectedKeyEnergy = keyEnergyOptions.find(
+    (opt) => opt.key === keyEnergyKey,
+  );
   const indexGutter = React.useMemo(() => {
     const n = (showZ ? prettyZ.count : prettySym.count) ?? 0;
     return n
@@ -563,11 +616,9 @@ export default function ConformerPage() {
               <CardContent className="space-y-6">
                 {/* SMILES */}
                 <InfoRow
-                  label={
-                    <span className="text-sm font-semibold text-slate-700">
-                      SMILES
-                    </span>
-                  }
+                  label="SMILES"
+                  labelClassName="text-sm font-semibold text-slate-700"
+                  alignTop
                 >
                   <div className="grid grid-cols-[1fr_auto] gap-3 w-full">
                     <div className="min-w-0">
@@ -613,24 +664,26 @@ export default function ConformerPage() {
                   </div>
                   <div className="space-y-2">
                     <InfoRow label="TS">
-                      <span className="inline-flex items-center gap-2 text-sm text-slate-800">
+                      <span className="inline-flex items-center gap-2 text-sm text-foreground">
                         <Dot on={data.is_ts} />
-                        <span>{data.is_ts ? "Yes" : "No"}</span>
+                        <span className="text-foreground">
+                          {data.is_ts ? "Yes" : "No"}
+                        </span>
                       </span>
                     </InfoRow>
                     <InfoRow label="Representative">
-                      <span className="inline-flex items-center gap-2 text-sm text-slate-800">
+                      <span className="inline-flex items-center gap-2 text-sm text-foreground">
                         <Dot on={data.is_well_representative} />
-                        <span>
+                        <span className="text-foreground">
                           {data.is_well_representative ? "Yes" : "No"}
                         </span>
                       </span>
                     </InfoRow>
                     <InfoRow label="Well">
-                      <span className="text-sm text-slate-800">
+                      <span className="text-sm text-foreground">
                         {data.well_label ?? "—"}
                         {typeof data.well_rank === "number" ? (
-                          <span className="text-slate-500">
+                          <span className="text-sm text-foreground/80">
                             {" "}
                             · rank {data.well_rank}
                           </span>
@@ -704,15 +757,36 @@ export default function ConformerPage() {
             {/* Key energy only */}
             <Card className="h-full">
               <CardHeader className="pb-2">
-                <CardTitle className="text-base">Key energy</CardTitle>
-                <CardDescription>selected metric</CardDescription>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-base">Key energy</CardTitle>
+                    <CardDescription>selected metric</CardDescription>
+                  </div>
+                  {keyEnergyOptions.length > 0 && (
+                    <Select
+                      value={keyEnergyKey ?? undefined}
+                      onValueChange={(value) => setKeyEnergyKey(value)}
+                    >
+                      <SelectTrigger className="h-8 w-36">
+                        <SelectValue placeholder="Metric" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {keyEnergyOptions.map((option) => (
+                          <SelectItem key={option.key} value={option.key}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
-                {data.energy_label && data.energy_value != null ? (
-                  <InfoRow label={data.energy_label}>
+                {selectedKeyEnergy ? (
+                  <InfoRow label={selectedKeyEnergy.label}>
                     <div className="flex items-baseline gap-2">
                       <span className="font-mono tabular-nums text-right inline-block w-[18ch] text-base">
-                        {Number(data.energy_value).toExponential(4)}
+                        {Number(selectedKeyEnergy.value).toExponential(4)}
                       </span>
                       <span className="text-slate-500 text-sm">kJ/mol</span>
                     </div>
