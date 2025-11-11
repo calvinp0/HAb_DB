@@ -22,6 +22,7 @@ import {
   ResponsiveContainer,
   ReferenceArea,
 } from "recharts";
+import type { TooltipProps } from "recharts";
 import { Download, Activity, Thermometer } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -55,6 +56,28 @@ export type CpViewerProps = {
 // ---- Constants ----
 const R = 8.314462618; // J/(mol*K)
 const CAL_PER_J = 1 / 4.184;
+const SAMPLE_POLYS: NASA7[] = [
+  {
+    form: "NASA7",
+    Tmin_K: 200,
+    Tmax_K: 1000,
+    coeffs: [3.5, 1.2e-3, -3.4e-6, 5.6e-9, -2.1e-12, 0, 0],
+    fit_rmse: 30,
+  },
+  {
+    form: "NASA7",
+    Tmin_K: 1000,
+    Tmax_K: 3000,
+    coeffs: [4.0, 8.0e-4, -2.8e-7, 4.1e-10, -1.5e-13, 0, 0],
+    fit_rmse: 22,
+  },
+];
+const SAMPLE_CURVE: CPCurve = {
+  T_K: [300, 400, 500, 600, 800, 1000, 1500, 2000, 2400],
+  Cp_J_per_molK: [44.1, 49.2, 53.1, 56.3, 61.4, 64.0, 69.8, 73.0, 75.2],
+  source: "example",
+  raw_units: { Cp_T_units: "J/(mol*K)", T_units: "K" },
+};
 
 type Unit = "J" | "kJ" | "cal";
 
@@ -170,25 +193,34 @@ function SegmentBadges({ polys }: { polys: NASA7[] }) {
 }
 
 // ---- Tooltip ----
-const ChartTooltip = ({ active, payload, label, units }: any) => {
+type ChartTooltipProps = TooltipProps<number, string> & { units: string };
+
+const ChartTooltip = ({ active, payload, label, units }: ChartTooltipProps) => {
   if (!active || !payload?.length) return null;
-  const find = (key: string) =>
-    payload.find((p: any) => p.dataKey === key)?.value;
-  const T = label;
-  const raw = find("cp_raw");
-  const fit = find("cp_fit");
-  const delta = raw != null && fit != null ? raw - fit : undefined;
+  const findValue = (key: string) =>
+    payload.find((p) => p.dataKey === key)?.value;
+  const T = typeof label === "number" ? label : Number(label);
+  const raw = findValue("cp_raw");
+  const fit = findValue("cp_fit");
+  const numericRaw = typeof raw === "number" ? raw : Number(raw);
+  const numericFit = typeof fit === "number" ? fit : Number(fit);
+  const delta =
+    Number.isFinite(numericRaw) && Number.isFinite(numericFit)
+      ? numericRaw - numericFit
+      : undefined;
   return (
     <div className="rounded-xl border bg-background/90 p-3 shadow-xl">
-      <div className="text-sm font-medium">T = {Number(T).toFixed(1)} K</div>
-      {raw != null && (
+      <div className="text-sm font-medium">
+        T = {Number.isFinite(T) ? T.toFixed(1) : "—"} K
+      </div>
+      {Number.isFinite(numericRaw) && (
         <div className="text-sm">
-          Cp(raw) = {raw.toFixed(3)} {units}
+          Cp(raw) = {numericRaw.toFixed(3)} {units}
         </div>
       )}
-      {fit != null && (
+      {Number.isFinite(numericFit) && (
         <div className="text-sm">
-          Cp(fit) = {fit.toFixed(3)} {units}
+          Cp(fit) = {numericFit.toFixed(3)} {units}
         </div>
       )}
       {delta != null && (
@@ -210,35 +242,14 @@ export default function CpCurveViewer({
   polynomials,
   active = true,
 }: CpViewerProps) {
-  // Fallback sample (small NH fragment) to keep the component previewable
-  const samplePolys: NASA7[] = [
-    {
-      form: "NASA7",
-      Tmin_K: 200,
-      Tmax_K: 1000,
-      coeffs: [3.5, 1.2e-3, -3.4e-6, 5.6e-9, -2.1e-12, 0, 0],
-      fit_rmse: 30,
-    },
-    {
-      form: "NASA7",
-      Tmin_K: 1000,
-      Tmax_K: 3000,
-      coeffs: [4.0, 8.0e-4, -2.8e-7, 4.1e-10, -1.5e-13, 0, 0],
-      fit_rmse: 22,
-    },
-  ];
-  const sampleCurve: CPCurve = {
-    T_K: [300, 400, 500, 600, 800, 1000, 1500, 2000, 2400],
-    Cp_J_per_molK: [44.1, 49.2, 53.1, 56.3, 61.4, 64.0, 69.8, 73.0, 75.2],
-    source: "example",
-    raw_units: { Cp_T_units: "J/(mol*K)", T_units: "K" },
-  };
-
   const polys = useMemo(
-    () => (polynomials && polynomials.length ? polynomials : samplePolys),
+    () => (polynomials && polynomials.length ? polynomials : SAMPLE_POLYS),
     [polynomials],
   );
-  const rawPairs = useMemo(() => zipRaw(curve ?? sampleCurve), [curve]);
+  const rawPairs = useMemo(
+    () => zipRaw(curve ?? SAMPLE_CURVE),
+    [curve],
+  );
 
   const Tmin = useMemo(
     () =>

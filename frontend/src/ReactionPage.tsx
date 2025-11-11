@@ -18,13 +18,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Loader2,
-  Flame,
-  ArrowRightLeft,
-  Thermometer,
-  Gauge,
-} from "lucide-react";
+import { Loader2, ArrowRightLeft } from "lucide-react";
+import type { TooltipProps } from "recharts";
 import {
   LineChart,
   Line,
@@ -33,7 +28,6 @@ import {
   CartesianGrid,
   Tooltip as RTooltip,
   ResponsiveContainer,
-  Legend,
 } from "recharts";
 import {
   Dialog,
@@ -43,8 +37,10 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ExpandableKineticsChart } from "./KineticsPanel";
+import { ThemeModeToggle } from "@/components/ThemeModeToggle";
 
 const RAW_API = import.meta.env.VITE_API_BASE ?? "/api";
+const BASE_URL = import.meta.env.BASE_URL || "/";
 
 function api(path: string) {
   // ensures exactly one slash between base and path
@@ -108,7 +104,7 @@ type ReactionDetail = {
 type CPCurve = {
   T_K: number[];
   Cp_J_per_molK: number[];
-  raw_units?: any;
+  raw_units?: Record<string, unknown> | null;
   Cp0_raw?: number | null;
   CpInf_raw?: number | null;
   source?: string | null;
@@ -122,9 +118,56 @@ type NASA7 = {
   source?: string | null;
 };
 type Thermo = { curve: CPCurve | null; polynomials: NASA7[] };
+type ReactionDetailResponse = Omit<ReactionDetail, "participants"> & {
+  participants: ParticipantWire[];
+};
+type ConformerDetailResponse = ConformerLite & {
+  species_id: number;
+  smiles?: string | null;
+  smiles_no_h?: string | null;
+  geom_xyz?: string | null;
+  energy_label?: string | null;
+  energy_value?: number | null;
+};
 
 // ---------- constants / helpers ----------
-const API_BASE = import.meta.env.VITE_API_BASE || "/api";
+const formatAbsoluteEnergy = (value: number | null, digits = 2) =>
+  Number.isFinite(value as number)
+    ? `${(value as number).toFixed(digits)} kJ/mol`
+    : "N/A";
+
+const formatRelativeEnergy = (value: number | null, digits = 2) =>
+  Number.isFinite(value as number)
+    ? `${(value as number) >= 0 ? "+" : ""}${(value as number).toFixed(digits)} kJ/mol`
+    : "N/A";
+
+type PesTooltipDatum = {
+  label: string;
+  raw: number | null;
+  E: number | null;
+};
+
+type PesTooltipProps = TooltipProps<number, string> & {
+  zeroLabel: string;
+};
+
+function PesTooltip({ active, payload, zeroLabel }: PesTooltipProps) {
+  if (!active || !payload?.length) return null;
+  const datum = payload[0]?.payload as PesTooltipDatum | undefined;
+  if (!datum) return null;
+
+  return (
+    <div className="rounded-md border border-border bg-background/95 px-3 py-2 shadow-md">
+      <p className="text-sm font-medium">{datum.label}</p>
+      <p className="text-xs text-muted-foreground">
+        Absolute: {formatAbsoluteEnergy(datum.raw)}
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Relative to {zeroLabel}: {formatRelativeEnergy(datum.E)}
+      </p>
+    </div>
+  );
+}
 
 async function fetchJSON<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -133,11 +176,9 @@ async function fetchJSON<T>(url: string): Promise<T> {
 }
 
 function BackLink() {
-  const base = (import.meta as any).env?.BASE_URL || "/";
-
   return (
     <Link
-      to={base}
+      to={BASE_URL}
       className="text-sm underline underline-offset-2 cursor-pointer"
       title="Back to search"
     >
@@ -173,37 +214,36 @@ function pickEnergyLabelValue(c: ConformerLite): {
   return { label: "", value: null };
 }
 
-type SurfaceMode = "E0" | "H298" | "G298";
-
-function energyForSurface(c: ConformerLite, mode: SurfaceMode): number | null {
-  // TS first: you may only have E_TS
-  const isTS = !!c.is_ts;
-  if (mode === "E0") {
-    if (isTS) return firstFinite([c.E_TS, sum(c.E_elec, c.ZPE)]);
-    return firstFinite([c.E0, sum(c.E_elec, c.ZPE)]);
-  }
-  if (mode === "H298") {
-    // Only plot H298 if available for ALL points; otherwise return null to avoid a mixed surface
-    return isTS ? null : firstFinite([c.H298]);
-  }
-  if (mode === "G298") {
-    return isTS ? null : firstFinite([c.G298]);
-  }
-  return null;
+function stripExplicitHydrogens(smiles?: string | null) {
+  if (!smiles) return null;
+  let s = smiles.replace(/\[\s*H(?:[+-]?\d*)?\s*]/gi, "");
+  // Collapse duplicate separators introduced after removals
+  s = s
+    .replace(/\.+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .replace(/\s+/g, "")
+    .replace(/\.\+/g, "+")
+    .replace(/\+\./g, "+");
+  s = s.trim();
+  return s || null;
 }
 
-function sum(a?: number | null, b?: number | null) {
-  return Number.isFinite(a as number) && Number.isFinite(b as number)
-    ? (a as number) + (b as number)
-    : null;
-}
-function firstFinite(xs: Array<number | null | undefined>) {
-  for (const x of xs) if (Number.isFinite(x as number)) return x as number;
-  return null;
+function displaySmiles(
+  sp: SpeciesLite | undefined,
+  speciesId: number,
+  explicit: boolean,
+) {
+  if (explicit) return sp?.smiles ?? `[${speciesId}]`;
+  const candidate =
+    (sp?.smiles_no_h && sp.smiles_no_h.trim().length
+      ? sp.smiles_no_h
+      : stripExplicitHydrogens(sp?.smiles)) ?? null;
+  return candidate ?? `[${speciesId}]`;
 }
 
 // Arrhenius
 const R_kJ = 8.314462618e-3;
+const R_J = 8.314462618;
 
 // full modified Arrhenius with T0 (defaults to 1 K)
 function kOfT(model: RateModel, T: number): number {
@@ -214,18 +254,88 @@ function kOfT(model: RateModel, T: number): number {
   return A * Math.pow(T / T0, n) * Math.exp(-Ea / (R_kJ * T));
 }
 
+function coerceNumber(v: unknown): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function sampleNASAForSpark(polys: NASA7[], maxPoints = 24) {
+  if (!polys?.length) return [];
+  const Tmin = Math.min(
+    ...polys
+      .map((p) => coerceNumber(p.Tmin_K))
+      .filter((n): n is number => n != null),
+  );
+  const Tmax = Math.max(
+    ...polys
+      .map((p) => coerceNumber(p.Tmax_K))
+      .filter((n): n is number => n != null),
+  );
+  if (!Number.isFinite(Tmin) || !Number.isFinite(Tmax) || Tmax <= Tmin) {
+    return [];
+  }
+
+  const pickSegment = (T: number) => {
+    const direct = polys.find((p) => T >= p.Tmin_K && T <= p.Tmax_K);
+    if (direct) return direct;
+    return polys.reduce((best, p) => {
+      if (!best) return p;
+      const mid = 0.5 * (p.Tmin_K + p.Tmax_K);
+      const bestMid = 0.5 * (best.Tmin_K + best.Tmax_K);
+      return Math.abs(T - mid) < Math.abs(T - bestMid) ? p : best;
+    }, polys[0] as NASA7);
+  };
+
+  const n = Math.max(3, Math.min(maxPoints, 30));
+  const denom = Math.max(1, n - 1);
+  const step = (Tmax - Tmin) / denom;
+  const pts: Array<{ T: number; Cp: number }> = [];
+  for (let i = 0; i < n; i++) {
+    const T = i === n - 1 ? Tmax : Tmin + i * step;
+    const seg = pickSegment(T);
+    const clamped = Math.min(
+      Math.max(T, coerceNumber(seg.Tmin_K) ?? T),
+      coerceNumber(seg.Tmax_K) ?? T,
+    );
+    const [a1r, a2r, a3r, a4r, a5r] = seg.coeffs;
+    const a1 = coerceNumber(a1r) ?? 0;
+    const a2 = coerceNumber(a2r) ?? 0;
+    const a3 = coerceNumber(a3r) ?? 0;
+    const a4 = coerceNumber(a4r) ?? 0;
+    const a5 = coerceNumber(a5r) ?? 0;
+    const cpOverR =
+      a1 +
+      a2 * clamped +
+      a3 * clamped * clamped +
+      a4 * clamped * clamped * clamped +
+      a5 * clamped * clamped * clamped * clamped;
+    pts.push({ T, Cp: cpOverR * R_J });
+  }
+  return pts;
+}
+
 function CpSpark({ thermo }: { thermo?: Thermo }) {
   const data = useMemo(() => {
     const cv = thermo?.curve;
-    if (!cv || !cv.T_K?.length || !cv.Cp_J_per_molK?.length) return [];
-    // Sample down to ~30 points so the sparkline is cheap
-    const n = Math.min(30, cv.T_K.length);
-    const step = Math.max(1, Math.floor(cv.T_K.length / n));
-    const pts = [];
-    for (let i = 0; i < cv.T_K.length; i += step) {
-      pts.push({ T: cv.T_K[i], Cp: cv.Cp_J_per_molK[i] });
+    if (cv && cv.T_K?.length && cv.Cp_J_per_molK?.length) {
+      // Sample down to ~30 points so the sparkline is cheap
+      const n = Math.min(30, cv.T_K.length);
+      const step = Math.max(1, Math.floor(cv.T_K.length / n));
+      const pts = [];
+      for (let i = 0; i < cv.T_K.length; i += step) {
+        const T = coerceNumber(cv.T_K[i]);
+        const Cp = coerceNumber(cv.Cp_J_per_molK[i]);
+        if (T == null || Cp == null) continue;
+        pts.push({ T, Cp });
+      }
+      if (pts.length) return pts;
     }
-    return pts;
+
+    const polys = thermo?.polynomials;
+    if (polys?.length) {
+      return sampleNASAForSpark(polys);
+    }
+    return [];
   }, [thermo]);
 
   if (!data.length)
@@ -245,81 +355,6 @@ function CpSpark({ thermo }: { thermo?: Thermo }) {
       </ResponsiveContainer>
     </div>
   );
-}
-
-async function fetchXYZForConformer(conformerId: number): Promise<string> {
-  const urls = [
-    api(`/conformers/${conformerId}/xyz`), // plain text
-    api(`/conformers/${conformerId}?format=xyz`), // query variant
-    api(`/conformers/${conformerId}`), // JSON that might contain xyz
-  ];
-
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, {
-        headers: { Accept: "application/json,chemical/x-xyz,text/plain,*/*" },
-      });
-      if (!res.ok) continue;
-      const ct = res.headers.get("content-type") || "";
-
-      // 1) Raw XYZ payload
-      if (!ct.includes("application/json")) {
-        const txt = (await res.text()).trim();
-        if (looksLikeXYZ(txt)) return ensureXYZHeaderLocal(txt);
-        continue;
-      }
-
-      // 2) JSON — try common keys
-      const j = await res.json();
-      const xyz =
-        j.xyz ??
-        j.XYZ ??
-        j.geometry_xyz ??
-        j.data?.xyz ??
-        j.content?.xyz ??
-        null;
-      if (typeof xyz === "string" && xyz.trim()) {
-        return ensureXYZHeaderLocal(xyz.trim());
-      }
-
-      // some APIs send { atoms: [{elem,x,y,z}, ...] }
-      if (Array.isArray(j.atoms) && j.atoms.length) {
-        const asXYZ = atomsToXYZ(j.atoms);
-        if (asXYZ) return ensureXYZHeaderLocal(asXYZ);
-      }
-    } catch {
-      // try next
-    }
-  }
-  throw new Error("No XYZ geometry found for this conformer.");
-}
-
-function looksLikeXYZ(s: string): boolean {
-  // simple: either starts with integer count line, or has many lines that look like "C 0.0 0.0 0.0"
-  const lines = s.split(/\r?\n/).filter(Boolean);
-  if (!lines.length) return false;
-  if (/^\s*\d+\s*$/.test(lines[0])) return true;
-  let atomish = 0;
-  for (const L of lines.slice(0, Math.min(10, lines.length))) {
-    if (/^[A-Za-z]{1,2}\s+[-+]?\d/.test(L)) atomish++;
-  }
-  return atomish >= 2; // at least two plausible atom lines
-}
-
-function atomsToXYZ(
-  atoms: Array<{
-    elem?: string;
-    element?: string;
-    x: number;
-    y: number;
-    z: number;
-  }>,
-): string {
-  const rows = atoms.map((a) => {
-    const e = (a.elem || a.element || "C").toString();
-    return `${e} ${a.x} ${a.y} ${a.z}`;
-  });
-  return `${rows.length}\nfrom JSON atoms\n${rows.join("\n")}\n`;
 }
 
 // ---------- lazy viewer at module scope ----------
@@ -356,14 +391,20 @@ function View3DButton({
       setLoading(true);
       setErr(null);
       try {
-        const d = await fetchJSON<any>(api(`/conformers/${conformerId}`));
+        const d = await fetchJSON<ConformerDetailResponse>(
+          api(`/conformers/${conformerId}`),
+        );
         if (!abort) {
           const s = ensureXYZHeaderLocal(d?.geom_xyz ?? "");
           if (!s) throw new Error("No geometry available for this conformer.");
           setXyz(s);
         }
-      } catch (e: any) {
-        if (!abort) setErr(e?.message ?? "Failed to load geometry");
+      } catch (e: unknown) {
+        if (!abort) {
+          const message =
+            e instanceof Error ? e.message : "Failed to load geometry";
+          setErr(message);
+        }
       } finally {
         if (!abort) setLoading(false);
       }
@@ -428,33 +469,33 @@ type ParticipantWire =
       smiles_no_h?: string | null;
     };
 
-function normalizeParticipants(ps: ParticipantWire[]): Participant[] {
-  return ps.map((p: any) => {
-    const c: ConformerLite =
-      p.conformer ??
-      p.c ??
-      ({
-        conformer_id: p.conformer_id,
-        species_id: p.species_id,
-        is_ts: p.is_ts,
-        well_label: p.well_label,
-        well_rank: p.well_rank,
-        lot: p.lot,
-        G298: p.G298,
-        H298: p.H298,
-        E_elec: p.E_elec,
-        ZPE: p.ZPE,
-        E0: p.E0,
-        E_TS: p.E_TS,
-      } as ConformerLite);
+function getConformerFromWire(p: ParticipantWire): ConformerLite {
+  if ("conformer" in p && p.conformer) return p.conformer;
+  if ("c" in p && p.c) return p.c;
+  const fallback = p as ConformerLite;
+  return {
+    conformer_id: fallback.conformer_id,
+    species_id: fallback.species_id,
+    is_ts: fallback.is_ts,
+    well_label: fallback.well_label ?? null,
+    well_rank: fallback.well_rank ?? null,
+    lot: fallback.lot,
+    G298: fallback.G298 ?? null,
+    H298: fallback.H298 ?? null,
+    E_elec: fallback.E_elec ?? null,
+    ZPE: fallback.ZPE ?? null,
+    E0: fallback.E0 ?? null,
+    E_TS: fallback.E_TS ?? null,
+  };
+}
 
-    return { role: p.role, conformer: c };
-  });
+function normalizeParticipants(ps: ParticipantWire[]): Participant[] {
+  return ps.map((p) => ({ role: p.role, conformer: getConformerFromWire(p) }));
 }
 
 // ---------- data hook (module scope) ----------
 // ---------- data hook (module scope) ----------
-function useReactionDetail(reactionId: number) {
+function useReactionDetail(reactionId: number | null) {
   const [rxn, setRxn] = useState<ReactionDetail | null>(null);
   const [thermo, setThermo] = useState<Record<number, Thermo>>({});
   const [speciesById, setSpeciesById] = useState<Record<number, SpeciesLite>>(
@@ -469,12 +510,25 @@ function useReactionDetail(reactionId: number) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (reactionId == null || !Number.isFinite(reactionId)) {
+      setRxn(null);
+      setThermo({});
+      setSpeciesById({});
+      setGeomByConfId({});
+      setEnergyByConfId({});
+      setLoading(false);
+      return;
+    }
+
     let mounted = true;
     (async () => {
       try {
         setLoading(true);
+        setError(null);
 
-        const raw = await fetchJSON<any>(api(`/reactions/${reactionId}`));
+        const raw = await fetchJSON<ReactionDetailResponse>(
+          api(`/reactions/${reactionId}`),
+        );
         if (!mounted) return;
 
         const r: ReactionDetail = {
@@ -505,7 +559,9 @@ function useReactionDetail(reactionId: number) {
         const detailPairs = await Promise.all(
           confIds.map(async (id) => {
             try {
-              const d = await fetchJSON<any>(api(`/conformers/${id}`));
+              const d = await fetchJSON<ConformerDetailResponse>(
+                api(`/conformers/${id}`),
+              );
               return [id, d] as const;
             } catch {
               return [id, null] as const;
@@ -514,7 +570,7 @@ function useReactionDetail(reactionId: number) {
         );
         if (!mounted) return;
 
-        const detailByConfId: Record<number, any> =
+        const detailByConfId: Record<number, ConformerDetailResponse | null> =
           Object.fromEntries(detailPairs);
 
         // BUILD: energy map from backend-chosen values
@@ -522,7 +578,7 @@ function useReactionDetail(reactionId: number) {
         for (const [cid, d] of detailPairs) {
           const val = d?.energy_value;
           if (typeof val === "number" && Number.isFinite(val)) {
-            energyMap[cid] = val; // your API is already kJ/mol
+            energyMap[cid] = val; // API returns kJ/mol
           }
         }
         setEnergyByConfId(energyMap);
@@ -553,22 +609,16 @@ function useReactionDetail(reactionId: number) {
         const xyzEntries: Array<[number, string]> = [];
         for (const [, d] of detailPairs) {
           if (!d) continue;
-          if (typeof d.species_id === "number") {
-            spEntries.push([
-              d.species_id,
-              {
-                species_id: d.species_id,
-                smiles: d.smiles ?? null,
-                smiles_no_h: d.smiles_no_h ?? null,
-              },
-            ]);
-          }
-          if (
-            typeof d.conformer_id === "number" &&
-            typeof d.geom_xyz === "string" &&
-            d.geom_xyz.trim()
-          ) {
-            xyzEntries.push([d.conformer_id, d.geom_xyz as string]);
+          spEntries.push([
+            d.species_id,
+            {
+              species_id: d.species_id,
+              smiles: d.smiles ?? null,
+              smiles_no_h: d.smiles_no_h ?? null,
+            },
+          ]);
+          if (typeof d.geom_xyz === "string" && d.geom_xyz.trim()) {
+            xyzEntries.push([d.conformer_id, d.geom_xyz]);
           }
         }
 
@@ -583,8 +633,12 @@ function useReactionDetail(reactionId: number) {
         }
         setSpeciesById(mergedSpecies);
         setGeomByConfId(Object.fromEntries(xyzEntries));
-      } catch (e: any) {
-        if (mounted) setError(e?.message || "Failed to load reaction");
+      } catch (e: unknown) {
+        if (mounted) {
+          const message =
+            e instanceof Error ? e.message : "Failed to load reaction";
+          setError(message);
+        }
       } finally {
         if (mounted) setLoading(false);
       }
@@ -604,26 +658,6 @@ function useReactionDetail(reactionId: number) {
     loading,
     error,
   };
-}
-
-// ---------- small UI chunks ----------
-function EnergyChip({ c }: { c: ConformerLite }) {
-  const { label, value } = pickEnergyLabelValue(c);
-  return (
-    <Badge variant="secondary" className="font-mono">
-      {label ? `${label} = ${value?.toFixed(2)} kJ/mol` : "energy N/A"}
-    </Badge>
-  );
-}
-function LotChip({ lot }: { lot: Lot }) {
-  return (
-    <Badge
-      variant="outline"
-      title={`${lot.method}${lot.basis ? "/" + lot.basis : ""}${lot.solvent ? ` in ${lot.solvent}` : ""}`}
-    >
-      {lot.lot_string}
-    </Badge>
-  );
 }
 
 function ParticipantsTable({
@@ -664,9 +698,7 @@ function ParticipantsTable({
             {participants.map((p) => {
               const c = p.conformer;
               const sp = speciesById[c.species_id];
-              const smiles = explicitSmiles
-                ? (sp?.smiles ?? `[${c.species_id}]`)
-                : (sp?.smiles_no_h ?? sp?.smiles ?? `[${c.species_id}]`);
+              const smiles = displaySmiles(sp, c.species_id, explicitSmiles);
               const { label, value } = pickEnergyLabelValue(c);
 
               return (
@@ -753,11 +785,11 @@ function ReactionCoordinate({
   const energyFor = (c?: ConformerLite) =>
     c ? (energyByConfId[c.conformer_id] ?? null) : null;
 
-  let eR1H = energyFor(r1h);
-  let eR2 = energyFor(r2);
-  let eTS = energyFor(ts);
-  let eR1 = energyFor(r1);
-  let eR2H = energyFor(r2h);
+  const eR1H = energyFor(r1h);
+  const eR2 = energyFor(r2);
+  const eTS = energyFor(ts);
+  const eR1 = energyFor(r1);
+  const eR2H = energyFor(r2h);
 
   const sumEnergy = (...vals: Array<number | null>) => {
     const finite = vals.filter((v): v is number => Number.isFinite(v as number));
@@ -793,18 +825,26 @@ function ReactionCoordinate({
   ]
     .filter(Boolean)
     .join(" + ");
+  const reactantDisplayLabel = reactantLabel || "R1H + R2";
+  const productDisplayLabel = productLabel || "R1 + R2H";
+  const zeroReferenceDescription = Number.isFinite(eReactants as number)
+    ? "reactants"
+    : "lowest well";
+  const relativeZeroLabel = Number.isFinite(eReactants as number)
+    ? reactantDisplayLabel
+    : "lowest-energy well";
 
   const data = [
     eReactants != null && {
       key: "reactants",
-      label: reactantLabel || "R1H + R2",
+      label: reactantDisplayLabel,
       raw: eReactants,
       E: rel(eReactants),
     },
     ts && { key: "TS", label: "TS", raw: eTS, E: rel(eTS) },
     eProducts != null && {
       key: "products",
-      label: productLabel || "R1 + R2H",
+      label: productDisplayLabel,
       raw: eProducts,
       E: rel(eProducts),
     },
@@ -835,19 +875,63 @@ function ReactionCoordinate({
     .filter((v): v is number => Number.isFinite(v as number));
   const yMin = yValues.length ? Math.min(...yValues) : -10;
   const yMax = yValues.length ? Math.max(...yValues) : 10;
-  const padding = Math.max(5, Math.abs(yMax - yMin) * 0.2);
-  const yDomain: [number, number] = [
-    Math.floor((yMin - padding) * 10) / 10,
-    Math.ceil((yMax + padding) * 10) / 10,
-  ];
+  const yDomain: [number, number] = useMemo(() => {
+    const padding = Math.max(5, Math.abs(yMax - yMin) * 0.2);
+    return [
+      Math.floor((yMin - padding) * 10) / 10,
+      Math.ceil((yMax + padding) * 10) / 10,
+    ];
+  }, [yMin, yMax]);
+  const yTicks = useMemo(() => {
+    const [minY, maxY] = yDomain;
+    if (!Number.isFinite(minY) || !Number.isFinite(maxY)) return undefined;
+    const span = maxY - minY || 1;
+    const approx = span / 5;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(Math.abs(approx))));
+    const normalized = approx / magnitude;
+    const niceNormalized =
+      normalized < 1.5 ? 1 : normalized < 3 ? 2 : normalized < 7 ? 5 : 10;
+    const step = niceNormalized * magnitude;
+    const ticks: number[] = [];
+    const start = Math.ceil(minY / step) * step;
+    for (let val = start; val <= maxY + step * 0.5; val += step) {
+      ticks.push(Number(val.toFixed(2)));
+    }
+    if (minY <= 0 && maxY >= 0 && !ticks.some((t) => Math.abs(t) < step * 0.01)) {
+      ticks.push(0);
+    }
+    return Array.from(new Set(ticks)).sort((a, b) => a - b);
+  }, [yDomain]);
+
+  const relativeCallouts =
+    Number.isFinite(eReactants as number)
+      ? [
+          Number.isFinite(dE_dagger_fwd as number) && {
+            label: "TS",
+            value: dE_dagger_fwd as number,
+          },
+          Number.isFinite(dE_rxn as number) && {
+            label: productDisplayLabel,
+            value: dE_rxn as number,
+          },
+        ].filter(Boolean)
+      : [];
+  const relativeCalloutText = (relativeCallouts as Array<{
+    label: string;
+    value: number;
+  }>)
+    .map(
+      ({ label, value }) => `${label}: ${formatRelativeEnergy(value, 1)}`,
+    )
+    .join(" · ");
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">Reaction coordinate (PES)</CardTitle>
         <CardDescription>
-          R1H + R2 → TS → R1 + R2H · energies from backend (relative to{" "}
-          {Number.isFinite(eReactants as number) ? "reactants" : "lowest well"})
+          R1H + R2 → TS → R1 + R2H · absolute + relative energies (relative to{" "}
+          {zeroReferenceDescription})
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -862,6 +946,7 @@ function ReactionCoordinate({
               <YAxis
                 width={82}
                 tick={{ dx: -2 }}
+                ticks={yTicks}
                 label={{
                   value: "ΔE [kJ/mol] (relative)",
                   angle: -90,
@@ -871,11 +956,7 @@ function ReactionCoordinate({
                 }}
                 domain={yDomain}
               />
-              <RTooltip
-                formatter={(_v: any, _n: any, p: any) =>
-                  `${(p?.payload?.raw as number)?.toFixed?.(2) ?? "N/A"} kJ/mol`
-                }
-              />
+              <RTooltip content={<PesTooltip zeroLabel={relativeZeroLabel} />} />
               <Line
                 type="linear"
                 dataKey={() => 0}
@@ -894,6 +975,12 @@ function ReactionCoordinate({
             </LineChart>
           </ResponsiveContainer>
         </div>
+
+        {relativeCallouts.length > 0 && relativeCalloutText && (
+          <p className="text-xs text-muted-foreground">
+            Relative to {reactantDisplayLabel}: {relativeCalloutText}
+          </p>
+        )}
 
         <div className="flex flex-wrap gap-2 text-sm">
           <Badge variant="outline">
@@ -998,11 +1085,11 @@ function KineticsPanel({
     "#0d9488",
   ];
 
-  const yTickFmt = (v: any) => {
-    const n = Number(v);
-    if (!isFinite(n) || n === 0) return "0";
-    const e = Math.floor(Math.log10(n));
-    return `1e${e}`;
+  const yTickFmt = (value: number | string) => {
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n) || n === 0) return "0";
+    const exponent = Math.floor(Math.log10(Math.abs(n)));
+    return `1e${exponent}`;
   };
 
   return (
@@ -1091,13 +1178,9 @@ function KineticsPanel({
 // ---------- page ----------
 export default function ReactionPage() {
   const { id } = useParams();
-  const reactionId = Number(id);
+  const reactionIdRaw = Number(id);
+  const reactionId = Number.isFinite(reactionIdRaw) ? reactionIdRaw : null;
   const [explicitSmiles, setExplicitSmiles] = useState(false);
-  if (!Number.isFinite(reactionId)) {
-    return (
-      <div className="p-6 text-sm text-rose-600">Invalid reaction id.</div>
-    );
-  }
 
   const {
     rxn,
@@ -1108,6 +1191,12 @@ export default function ReactionPage() {
     loading,
     error,
   } = useReactionDetail(reactionId);
+
+  if (reactionId == null) {
+    return (
+      <div className="p-6 text-sm text-rose-600">Invalid reaction id.</div>
+    );
+  }
 
   if (loading)
     return (
@@ -1121,8 +1210,9 @@ export default function ReactionPage() {
 
   const labelForRole = (role: Participant["role"]) => {
     const conf = rxn.participants.find((p) => p.role === role)?.conformer;
-    const sp = conf ? speciesById[conf.species_id] : undefined;
-    return sp?.smiles_no_h ?? sp?.smiles ?? `[${conf?.species_id ?? "?"}]`;
+    if (!conf) return `[${role}]`;
+    const sp = speciesById[conf.species_id];
+    return displaySmiles(sp, conf.species_id, false);
   };
 
   const reactionTitle = [
@@ -1150,8 +1240,9 @@ export default function ReactionPage() {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary">{rxn.family}</Badge>
+          <ThemeModeToggle condensed />
           <BackLink />
         </div>
       </div>

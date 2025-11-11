@@ -69,3 +69,34 @@ def test_incomplete_triplet_errors(tmp_path: Path):
     dst = write_mols(tmp_path / "case.sdf", [r1h, r2h, r1])  # missing TS and R2
     with pytest.raises(ValueError):
         list(iter_triplets(dst, strict_roles=True, sanitize=True))
+
+
+def test_parses_jsonish_properties(tmp_path: Path):
+    src = Path(__file__).parent / "sample.sdf"
+    r1h, r2h, ts = read_mols(src)
+    r1, r2 = _augment_with_r1_r2(r1h, r2h)
+    set_prop(ts, "mol_properties", '{"activation": 12.3, "tags": ["barrier"]}')
+    set_prop(r1, "ELECTRO_MAP", "{'contours': [0.1, 0.2]}")
+    # 'unknown' should be treated the same as an empty mapping
+    set_prop(r2, "mol_properties", "unknown")
+    dst = write_mols(tmp_path / "case.sdf", [r1h, r2h, ts, r1, r2])
+
+    trip = next(iter_triplets(dst, strict_roles=True, sanitize=True))
+
+    assert trip.records["TS"].mol_properties == {"activation": 12.3, "tags": ["barrier"]}
+    assert trip.records["R1"].electro_map == {"contours": [0.1, 0.2]}
+    assert trip.records["R2"].mol_properties == {}
+
+
+def test_reaction_name_mismatch_raises(tmp_path: Path):
+    src = Path(__file__).parent / "sample.sdf"
+    r1h, r2h, ts = read_mols(src)
+    r1, r2 = _augment_with_r1_r2(r1h, r2h)
+    for mol in (r1h, r2h, ts, r1):
+        set_prop(mol, "reaction", "rxn-A")
+    set_prop(r2, "reaction", "rxn-B")
+    dst = write_mols(tmp_path / "case.sdf", [r1h, r2h, ts, r1, r2])
+
+    with pytest.raises(ValueError) as excinfo:
+        list(iter_triplets(dst, strict_roles=True, sanitize=True))
+    assert "different reaction names" in str(excinfo.value)

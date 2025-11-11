@@ -12,9 +12,32 @@ import {
   Tooltip as RTooltip,
   Legend,
 } from "recharts";
+import type { TooltipProps } from "recharts";
 import React from "react";
+import { cn } from "@/lib/utils";
 
 type LegendVariant = "inline" | "overlay";
+type KineticsPoint = { x: number; T: number; k: number };
+type KineticsSeries = {
+  id: number | string;
+  label: string;
+  pts: KineticsPoint[];
+};
+type TickFormatterFn = (value: number | string) => string;
+
+type KineticsChartProps = {
+  series: KineticsSeries[];
+  xDomain: [number, number];
+  arrheniusTicks?: number[];
+  arrheniusX: boolean;
+  xLabel: string;
+  yTickFmt: TickFormatterFn;
+  COLORS: string[];
+  height?: number | string;
+  legendSize?: "sm" | "md" | "lg";
+  legendVariant?: LegendVariant;
+  unitLabel?: string;
+};
 
 function KineticsChartBody({
   series,
@@ -27,20 +50,8 @@ function KineticsChartBody({
   height = "100%",
   legendSize = "md",
   legendVariant = "inline",
-  unitLabel = "k(T)", // <-- NEW
-}: {
-  series: Array<{ id: number | string; label: string; pts: any[] }>;
-  xDomain: [number, number];
-  arrheniusTicks?: number[];
-  arrheniusX: boolean;
-  xLabel: string;
-  yTickFmt: (y: number) => string;
-  COLORS: string[];
-  height?: number;
-  legendSize?: "sm" | "md" | "lg";
-  legendVariant?: LegendVariant;
-  unitLabel?: string;
-}) {
+  unitLabel = "k(T)",
+}: KineticsChartProps) {
   const SIZES = {
     sm: {
       swatch: "h-2 w-2",
@@ -62,6 +73,25 @@ function KineticsChartBody({
     },
   }[legendSize];
 
+  const tooltipFormatter = React.useCallback<
+    TooltipProps<number, string>["formatter"]
+  >(
+    (value, _name, payloadItem) => {
+      const numericValue =
+        typeof value === "number" ? value : Number(value);
+      const point = payloadItem?.payload as KineticsPoint | undefined;
+      const formattedK = Number.isFinite(numericValue)
+        ? `${numericValue.toExponential(3)} ${unitLabel}`
+        : "—";
+      const formattedT =
+        point && Number.isFinite(point.T)
+          ? `T=${Math.round(point.T)} K`
+          : "T=N/A";
+      return [formattedK, formattedT];
+    },
+    [unitLabel],
+  );
+
   return (
     <div className="relative w-full" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
@@ -77,7 +107,7 @@ function KineticsChartBody({
           <XAxis
             type="number"
             dataKey="x"
-            domain={xDomain as any}
+            domain={xDomain}
             ticks={arrheniusTicks}
             tickFormatter={(x) =>
               arrheniusX ? Number(x).toFixed(1) : String(Math.round(Number(x)))
@@ -95,17 +125,7 @@ function KineticsChartBody({
               position: "insideLeft",
             }}
           />
-          <RTooltip
-            formatter={(val: any, _name: string, p: any) => {
-              const k = Number(val);
-              const T = p?.payload?.T;
-              return [
-                isFinite(k) ? `${k.toExponential(3)} ${unitLabel}` : "—",
-                `T=${Math.round(T)} K`,
-              ];
-            }}
-            labelFormatter={() => ""}
-          />
+          <RTooltip formatter={tooltipFormatter} labelFormatter={() => ""} />
 
           {legendVariant === "inline" && (
             <Legend
@@ -174,7 +194,11 @@ function KineticsChartBody({
 
       {legendVariant === "overlay" && (
         <div
-          className={`pointer-events-none absolute right-3 top-3 rounded-md bg-white/90 backdrop-blur-sm shadow-sm ${SIZES.pad} ${SIZES.text}`}
+          className={cn(
+            "pointer-events-none absolute right-3 top-3 rounded-md backdrop-blur-sm shadow-sm bg-card/90 dark:bg-card/70",
+            SIZES.pad,
+            SIZES.text,
+          )}
         >
           <div className={`flex flex-wrap ${SIZES.gap}`}>
             {series.map((s, i) => (
@@ -193,10 +217,8 @@ function KineticsChartBody({
   );
 }
 
-export function ExpandableKineticsChart(
-  props: React.ComponentProps<typeof KineticsChartBody>,
-) {
-  const { height = 512, ...rest } = props;
+export function ExpandableKineticsChart(props: KineticsChartProps) {
+  const { height = 512, ...chartProps } = props;
 
   return (
     <Dialog>
@@ -216,7 +238,7 @@ export function ExpandableKineticsChart(
           </DialogTrigger>
           <div className="h-full">
             <KineticsChartBody
-              {...props}
+              {...chartProps}
               legendVariant="inline" // bottom legend on the page
               legendSize="md"
               height={height}
@@ -235,9 +257,10 @@ export function ExpandableKineticsChart(
         >
           <div className="w-full h-full">
             <KineticsChartBody
-              {...props}
+              {...chartProps}
               legendVariant="overlay" // floating legend on the chart
               legendSize="lg"
+              height="100%"
             />
           </div>
         </DialogContent>

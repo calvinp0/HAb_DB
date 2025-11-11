@@ -1,6 +1,6 @@
 import * as React from "react";
-import { useParams, Link, useNavigate, useLocation } from "react-router-dom";
-import { Beaker, CheckCircle2, XCircle, Copy, Loader2 } from "lucide-react";
+import { useParams, Link, useLocation } from "react-router-dom";
+import { Beaker, Loader2 } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -9,7 +9,6 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import ConformerViewer3D from "@/ConformerViewer3D";
@@ -21,14 +20,56 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { capitalizeWords } from "@/lib/utils";
+import { ThemeModeToggle } from "@/components/ThemeModeToggle";
 import CpCurveViewer, { CPCurve, NASA7 } from "@/CpNasaViewer";
 
 const API_BASE = new URL(
-  (import.meta as any).env?.VITE_API_BASE ?? "/api/",
+  import.meta.env.VITE_API_BASE ?? "/api/",
   window.location.origin,
 );
 
-const BASE = (import.meta as any).env?.BASE_URL || "/";
+const BASE = import.meta.env.BASE_URL || "/";
+
+const VIEWER_THEMES = ["jmol", "gaussview", "chemcraft"] as const;
+type ViewerTheme = (typeof VIEWER_THEMES)[number];
+const isViewerTheme = (value: string): value is ViewerTheme =>
+  VIEWER_THEMES.includes(value as ViewerTheme);
+
+const VIEWER_STYLES = ["ballstick", "line", "spacefill"] as const;
+type ViewerStyle = (typeof VIEWER_STYLES)[number];
+const isViewerStyle = (value: string): value is ViewerStyle =>
+  VIEWER_STYLES.includes(value as ViewerStyle);
+
+const LABEL_MODES = ["elem", "index", "elem+index"] as const;
+type LabelModeOption = (typeof LABEL_MODES)[number];
+const isLabelModeOption = (value: string): value is LabelModeOption =>
+  LABEL_MODES.includes(value as LabelModeOption);
+
+const DETAIL_ENERGY_KEYS = ["G298", "H298", "E0", "E_elec", "ZPE", "E_TS"] as const;
+
+type ApiErrorBody = { detail?: string };
+const isApiErrorBody = (value: unknown): value is ApiErrorBody =>
+  typeof value === "object" &&
+  value !== null &&
+  "detail" in value &&
+  typeof (value as { detail?: unknown }).detail === "string";
+const getErrorDetail = (body: unknown, fallback: string) =>
+  isApiErrorBody(body) && body.detail ? body.detail : fallback;
+
+type ReactionNavState = { fromReactionId?: number };
+
+function stripExplicitHydrogens(smiles?: string | null) {
+  if (!smiles) return null;
+  let s = smiles.replace(/\[\s*H(?:[+-]?\d*)?\s*]/gi, "");
+  s = s
+    .replace(/\.+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .replace(/\s+/g, "")
+    .replace(/\.\+/g, "+")
+    .replace(/\+\./g, "+")
+    .trim();
+  return s || null;
+}
 
 type SpeciesNameOut = {
   name: string;
@@ -73,16 +114,19 @@ type Detail = {
   names?: SpeciesNameOut[];
 };
 
+type ThermoResponse = {
+  curve?: CPCurve | null;
+  polynomials?: NASA7[];
+};
+
 type AdjacencyResponse = {
   adjacency: string;
 };
 
 function BackLink() {
-  const base = (import.meta as any).env?.BASE_URL || "/";
-
   return (
     <Link
-      to={base}
+      to={BASE}
       className="text-sm underline underline-offset-2 cursor-pointer"
       title="Back to search"
     >
@@ -90,9 +134,6 @@ function BackLink() {
     </Link>
   );
 }
-
-const num = (x?: number | null, d = 3) =>
-  x == null || !isFinite(Number(x)) ? "—" : Number(x).toFixed(d);
 
 const formatMethod = (s?: string | null) => {
   if (!s) return "—";
@@ -298,55 +339,27 @@ const InfoRow: React.FC<{ label: string; children: React.ReactNode }> = ({
   </div>
 );
 
-function parseXYZAtoms(xyz?: string | null) {
-  if (!xyz) return [] as { idx: number; elem: string }[];
-  const lines = xyz.replace(/\r/g, "").trim().split("\n");
-  const maybeN = parseInt(lines[0]?.trim() ?? "", 10);
-  const hasHeader = Number.isFinite(maybeN) && lines.length >= maybeN + 2;
-  const coordLines = hasHeader ? lines.slice(2) : lines;
-
-  const atoms = [] as { idx: number; elem: string }[];
-  for (let i = 0; i < coordLines.length; i++) {
-    const parts = coordLines[i].trim().split(/\s+/);
-    const elem = parts[0];
-    const x = Number(parts[1]),
-      y = Number(parts[2]),
-      z = Number(parts[3]);
-    if (
-      elem &&
-      Number.isFinite(x) &&
-      Number.isFinite(y) &&
-      Number.isFinite(z)
-    ) {
-      atoms.push({ idx: i + 1, elem });
-    }
-  }
-  return atoms;
-}
-
 export default function ConformerPage() {
   const { id } = useParams<{ id: string }>();
   const [data, setData] = React.useState<Detail | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [explicitH, setExplicitH] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
-  const [theme, setTheme] = React.useState<"jmol" | "gaussview" | "chemcraft">(
-    "jmol",
-  );
+  const [theme, setTheme] = React.useState<ViewerTheme>("jmol");
   const [showZ, setShowZ] = React.useState(false);
-  const atomList = React.useMemo(
-    () => parseXYZAtoms(data?.geom_xyz),
-    [data?.geom_xyz],
-  );
+  const canonicalSmiles = React.useMemo(() => {
+    if (!data) return null;
+    const noH = data.smiles_no_h?.trim();
+    if (noH) return noH;
+    const stripped = stripExplicitHydrogens(data.smiles);
+    if (stripped) return stripped;
+    return data.smiles?.trim() ?? null;
+  }, [data]);
   const smilesDisplay = React.useMemo(() => {
     const noH = data?.smiles_no_h ?? null;
     const full = data?.smiles ?? null;
     return explicitH ? (full ?? noH ?? "—") : (noH ?? full ?? "—");
   }, [data?.smiles, data?.smiles_no_h, explicitH]);
-  const keyEnergy = (d: Detail) =>
-    d.energy_label && d.energy_value != null
-      ? `${d.energy_label}: ${Number(d.energy_value).toFixed(3)}`
-      : "—";
   const [thermo, setThermo] = React.useState<{
     curve: CPCurve | null;
     polynomials: NASA7[];
@@ -365,14 +378,11 @@ export default function ConformerPage() {
     [data?.geom_xyz],
   );
   const displayXYZ = showZ ? prettyZ.text : prettySym.text;
-  const [style, setStyle] = React.useState<"ballstick" | "line" | "spacefill">(
-    "ballstick",
-  );
+  const [style, setStyle] = React.useState<ViewerStyle>("ballstick");
   const [spin, setSpin] = React.useState(false);
   const [showLabels, setShowLabels] = React.useState(true);
-  const [labelMode, setLabelMode] = React.useState<
-    "elem" | "index" | "elem+index"
-  >("elem+index");
+  const [labelMode, setLabelMode] =
+    React.useState<LabelModeOption>("elem+index");
   const [labelHydrogens, setLabelHydrogens] = React.useState(false);
   const [adjacency, setAdjacency] = React.useState<string | null>(null);
   const [adjacencyError, setAdjacencyError] = React.useState<string | null>(null);
@@ -389,10 +399,11 @@ export default function ConformerPage() {
       : "";
   }, [showZ, prettySym.count, prettyZ.count]);
 
-  const loc = useLocation() as { state?: { fromReactionId?: number } };
+  const loc = useLocation();
+  const reactionState = (loc.state as ReactionNavState | null) ?? null;
   const qs = new URLSearchParams(window.location.search);
   const fromReactionId =
-    loc.state?.fromReactionId ??
+    reactionState?.fromReactionId ??
     (qs.get("rid") ? Number(qs.get("rid")) : undefined);
 
   React.useEffect(() => {
@@ -408,8 +419,10 @@ export default function ConformerPage() {
         const res = await fetch(url, {
           headers: { Accept: "application/json" },
         });
-        const body = await res.json();
-        if (!res.ok) throw new Error(body?.detail || res.statusText);
+        const body: ThermoResponse = await res
+          .json()
+          .catch(() => ({}) as ThermoResponse);
+        if (!res.ok) throw new Error(getErrorDetail(body, res.statusText));
         setThermo({
           curve: body.curve ?? null,
           polynomials: body.polynomials ?? [],
@@ -428,18 +441,31 @@ export default function ConformerPage() {
     setAdjacencyError(null);
     setAdjacencyLoading(true);
     try {
-      const url = new URL(`conformers/${data.conformer_id}/adjacency`, API_BASE).toString();
+      const url = new URL(
+        `conformers/${data.conformer_id}/adjacency`,
+        API_BASE,
+      ).toString();
       const res = await fetch(url, { headers: { Accept: "application/json" } });
-      const body: AdjacencyResponse | { detail?: string } = await res
-        .json()
-        .catch(() => ({}));
+      const body = (await res.json().catch(() => ({}))) as
+        | AdjacencyResponse
+        | ApiErrorBody;
       if (!res.ok) {
-        throw new Error((body as any)?.detail || res.statusText);
+        throw new Error(getErrorDetail(body, res.statusText));
       }
-      setAdjacency((body as AdjacencyResponse).adjacency);
-    } catch (err) {
+      if ("adjacency" in body && typeof body.adjacency === "string") {
+        setAdjacency(body.adjacency);
+        setAdjacencyError(null);
+      } else {
+        setAdjacency(null);
+        setAdjacencyError("Adjacency data unavailable for this conformer.");
+      }
+    } catch (err: unknown) {
       setAdjacency(null);
-      setAdjacencyError((err as Error)?.message || "Unable to fetch adjacency list");
+      setAdjacencyError(
+        err instanceof Error
+          ? err.message
+          : "Unable to fetch adjacency list",
+      );
     } finally {
       setAdjacencyLoading(false);
     }
@@ -453,16 +479,21 @@ export default function ConformerPage() {
           headers: { Accept: "application/json" },
         });
         const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body?.detail || res.statusText);
+        if (!res.ok) throw new Error(getErrorDetail(body, res.statusText));
         setData(body as Detail);
-      } catch (e: any) {
-        setError(e?.message ?? String(e));
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : String(e));
       }
     })();
   }, [id]);
 
   if (error) return <div className="p-6 text-rose-600">Error: {error}</div>;
   if (!data) return <div className="p-6">Loading…</div>;
+  const headerTitle =
+    capitalizeWords(data.display_name) ||
+    data.well_label ||
+    canonicalSmiles ||
+    `Conformer ${data.conformer_id}`;
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
@@ -470,9 +501,7 @@ export default function ConformerPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">
-            {capitalizeWords(data.display_name) ||
-              data.well_label ||
-              `Conformer ${data.conformer_id}`}
+            {headerTitle}
           </h1>
           <div className="text-slate-500 text-sm">
             {data.is_ts ? "TS · " : ""}
@@ -484,18 +513,22 @@ export default function ConformerPage() {
           </div>
         </div>
 
-        {/* Render ONE back link */}
-        {fromReactionId ? (
-          <Link
-            to={`/reactions/${fromReactionId}`}
-            className="text-sm underline underline-offset-2 cursor-pointer"
-            title="Back to reaction"
-          >
-            ← Back to reaction
-          </Link>
-        ) : (
-          <BackLink />
-        )}
+        <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+          <div className="flex items-center gap-2">
+            <ThemeModeToggle condensed />
+          </div>
+          {fromReactionId ? (
+            <Link
+              to={`/reactions/${fromReactionId}`}
+              className="text-sm underline underline-offset-2 cursor-pointer"
+              title="Back to reaction"
+            >
+              ← Back to reaction
+            </Link>
+          ) : (
+            <BackLink />
+          )}
+        </div>
       </div>
 
       {/* Tabs wrapper */}
@@ -731,20 +764,22 @@ export default function ConformerPage() {
             <CardContent className="overflow-x-auto">
               <table className="text-sm">
                 <tbody>
-                  {["G298", "H298", "E0", "E_elec", "ZPE", "E_TS"].map((k) => (
-                    <tr key={k}>
-                      <td className="pr-6 py-1 text-slate-600 w-24">{k}</td>
-                      <td className="py-1">
-                        <span className="font-mono tabular-nums text-right inline-block w-[18ch]">
-                          {Number.isFinite((data as any)[k])
-                            ? Number((data as any)[k]).toExponential(
-                                energyDecimals,
-                              )
-                            : "—"}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {DETAIL_ENERGY_KEYS.map((k) => {
+                    const value = data[k];
+                    const formatted = Number.isFinite(value as number)
+                      ? Number(value).toExponential(energyDecimals)
+                      : "—";
+                    return (
+                      <tr key={k}>
+                        <td className="pr-6 py-1 text-slate-600 w-24">{k}</td>
+                        <td className="py-1">
+                          <span className="font-mono tabular-nums text-right inline-block w-[18ch]">
+                            {formatted}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </CardContent>
@@ -914,7 +949,12 @@ export default function ConformerPage() {
               {/* simple controls */}
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-500">Theme</span>
-                <Select value={theme} onValueChange={(v) => setTheme(v as any)}>
+                <Select
+                  value={theme}
+                  onValueChange={(v) => {
+                    if (isViewerTheme(v)) setTheme(v);
+                  }}
+                >
                   <SelectTrigger className="h-8 w-32">
                     <SelectValue placeholder="Theme" />
                   </SelectTrigger>
@@ -936,7 +976,9 @@ export default function ConformerPage() {
                   <span className="text-xs text-slate-500">Style</span>
                   <Select
                     value={style}
-                    onValueChange={(v) => setStyle(v as any)}
+                    onValueChange={(v) => {
+                      if (isViewerStyle(v)) setStyle(v);
+                    }}
                   >
                     <SelectTrigger className="h-8 w-32">
                       <SelectValue placeholder="Style" />
@@ -972,7 +1014,9 @@ export default function ConformerPage() {
                   <span className="text-xs text-slate-500">Label</span>
                   <Select
                     value={labelMode}
-                    onValueChange={(v) => setLabelMode(v as any)}
+                    onValueChange={(v) => {
+                      if (isLabelModeOption(v)) setLabelMode(v);
+                    }}
                   >
                     <SelectTrigger
                       className="h-8 w-32"

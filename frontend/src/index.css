@@ -68,17 +68,17 @@
     @apply w-full border-separate border-spacing-0;
   }
   thead th {
-    @apply sticky top-0 bg-white border-b border-zinc-200 text-xs font-semibold uppercase tracking-wide;
+    @apply sticky top-0 bg-card text-card-foreground border-b border-border text-xs font-semibold uppercase tracking-wide;
   }
   tbody td,
   thead th {
     @apply px-3 py-2;
   }
   tbody tr {
-    @apply border-b border-zinc-200;
+    @apply border-b border-border text-foreground transition-colors;
   }
   tbody tr:hover {
-    @apply bg-zinc-50;
+    @apply bg-secondary/50 text-secondary-foreground dark:bg-secondary/20;
   }
 }
 

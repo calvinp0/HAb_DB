@@ -13,7 +13,6 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
 import { useNavigate } from "react-router-dom";
 import {
@@ -25,6 +24,7 @@ import {
 } from "@/components/ui/sheet";
 
 import { ENERGY_KEYS, type EnergyKey } from "@/lib/constants";
+import { ThemeModeToggle } from "@/components/ThemeModeToggle";
 /**
  * Minimal React + TypeScript single-file app
  * - Search species by name / InChIKey / SMILES
@@ -41,7 +41,7 @@ import { ENERGY_KEYS, type EnergyKey } from "@/lib/constants";
  */
 
 const API_BASE = new URL(
-  (import.meta as any).env?.VITE_API_BASE ?? "/api/",
+  import.meta.env.VITE_API_BASE ?? "/api/",
   window.location.origin,
 );
 const DOWNLOAD_URL = new URL("downloads/reactions.zip", API_BASE).toString();
@@ -98,10 +98,21 @@ export type ReactionSummaryOut = {
 };
 
 export const FIELD =
-  "h-11 w-full rounded-xl border border-zinc-300 bg-white px-3 text-base " +
+  "h-11 w-full rounded-xl border border-zinc-300 bg-card px-3 text-base " +
   "leading-[1.25rem] placeholder:leading-[1.25rem] " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/10 " +
   "dark:border-zinc-700 dark:bg-zinc-900 placeholder:text-zinc-500";
+
+type SearchParams = Record<string, string | number | boolean | undefined>;
+
+const isApiErrorBody = (value: unknown): value is { detail?: string } => {
+  if (typeof value !== "object" || value === null || !("detail" in value))
+    return false;
+  return typeof (value as { detail?: unknown }).detail === "string";
+};
+
+const getErrorDetail = (body: unknown, fallback: string) =>
+  isApiErrorBody(body) && body.detail ? body.detail : fallback;
 
 function buildUrl(
   path: string,
@@ -147,11 +158,6 @@ function fmt(x: number | null | undefined, digits = 3) {
 function looksLikeInchiKey(s: string) {
   return /^[A-Z]{14}-[A-Z]{10}-[A-Z]$/i.test(s.trim());
 }
-function looksLikeSmiles(s: string) {
-  // crude but effective: characters common to SMILES or atom symbols/digits
-  return /[=#\[\]\(\)@+\-\d]/.test(s) || /^[BCNOPSFclBrI]+/i.test(s.trim());
-}
-
 function ElementPicker({
   atoms,
   setAtoms,
@@ -322,25 +328,8 @@ export default function App({ initialMode = "molecules" as Mode }) {
     "auto" | "smarts" | "inchi"
   >("auto");
   const [requireStereo, setRequireStereo] = useState(false);
-  const COMMON_ELEMENTS = [
-    "C",
-    "N",
-    "O",
-    "S",
-    "P",
-    "F",
-    "Cl",
-    "Br",
-    "I",
-    "Si",
-    "B",
-  ]; // feel free to add
-  const VALID_ELEM =
-    /^(H|He|Li|Be|B|C|N|O|F|Ne|Na|Mg|Al|Si|P|S|Cl|Ar|K|Ca|Sc|Ti|V|Cr|Mn|Fe|Co|Ni|Cu|Zn|Ga|Ge|As|Se|Br|Kr|Rb|Sr|Y|Zr|Nb|Mo|Tc|Ru|Rh|Pd|Ag|Cd|In|Sn|Sb|Te|I|Xe|Cs|Ba|La|Ce|Pr|Nd|Pm|Sm|Eu|Gd|Tb|Dy|Ho|Er|Tm|Yb|Lu|Hf|Ta|W|Re|Os|Ir|Pt|Au|Hg|Tl|Pb|Bi|Po|At|Rn)$/;
-
   const [atoms, setAtoms] = useState<string[]>([]); // ["C","N","S"]
   const [elemMode, setElemMode] = useState<"all" | "any">("all");
-  const [atomInput, setAtomInput] = useState("");
 
   // Selection -> Conformers
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -350,7 +339,6 @@ export default function App({ initialMode = "molecules" as Mode }) {
   //Conformer Filters
   const [repOnly, setRepOnly] = useState(false);
   const [nonTSOnly, setNonTSOnly] = useState(false);
-  const [lotId, setLotId] = useState<string | null>(null);
   const [selectedLot, setSelectedLot] = useState<string>("__ALL__");
   const [wellRank, setWellRank] = useState<number | null>(null);
   const [wellRankOptions, setWellRankOptions] = useState<number[]>([]);
@@ -434,7 +422,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
           return conf.is_well_representative ? 1 : 0;
         default:
           if (isEnergyKey(key)) {
-            const val = (conf as any)[key];
+            const val = conf[key as keyof ConformerRow];
             return typeof val === "number" ? val : Number.POSITIVE_INFINITY;
           }
           return conf.conformer_id;
@@ -462,7 +450,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
     ZPE: true,
     E_TS: true,
   });
-  const selectedEnergyKeys = useMemo(
+  const selectedEnergyKeys = useMemo<EnergyKey[]>(
     () => ENERGY_KEYS.filter((k) => energyOn[k]),
     [energyOn],
   );
@@ -505,7 +493,6 @@ export default function App({ initialMode = "molecules" as Mode }) {
   // auto-reload on checkboxes immediately
   useEffect(() => {
     if (selectedId != null) void loadConformers(selectedId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repOnly, nonTSOnly, selectedId]);
 
   useEffect(() => {
@@ -513,14 +500,13 @@ export default function App({ initialMode = "molecules" as Mode }) {
     setWellRank(null);
   }, [selectedId]);
 
-  // debounce lotId / wellRank for 300ms
+  // debounce wellRank for 300ms
   useEffect(() => {
     if (selectedId == null) return;
     const t = setTimeout(() => {
       void loadConformers(selectedId);
     }, 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wellRank, selectedId]);
 
   useEffect(() => {
@@ -558,7 +544,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
       if (mode === "reactions") {
         setRxnLoading(true);
         setReactions([]);
-        const params: Record<string, any> = {
+        const params: SearchParams = {
           reactant_q: rxnReactant.trim() || undefined,
           reactant_q2: rxnReactant2.trim() || undefined,
           product_q: rxnProduct.trim() || undefined,
@@ -576,7 +562,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
           : [];
         if (!res.ok)
           throw new Error(
-            (body as any)?.detail || `${res.status} ${res.statusText}`,
+            getErrorDetail(body, `${res.status} ${res.statusText}`),
           );
         setReactions(body as ReactionSummaryOut[]);
         // keep species list empty for this tab
@@ -585,7 +571,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
       }
 
       // ----- existing molecules / ts paths unchanged -----
-      const params: Record<string, any> = {
+      const params: SearchParams = {
         limit: effLimit,
         offset: effOffset,
       };
@@ -630,11 +616,12 @@ export default function App({ initialMode = "molecules" as Mode }) {
         : [];
       if (!res.ok)
         throw new Error(
-          (body as any)?.detail || `${res.status} ${res.statusText}`,
+          getErrorDetail(body, `${res.status} ${res.statusText}`),
         );
       setSpecies(body as SpeciesOut[]);
-    } catch (e: any) {
-      setError(e?.message ?? String(e));
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
       setSpecies([]);
       setReactions([]);
     } finally {
@@ -672,7 +659,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
           : [];
         if (!res.ok)
           throw new Error(
-            (body as any)?.detail || `${res.status} ${res.statusText}`,
+            getErrorDetail(body, `${res.status} ${res.statusText}`),
           );
         const rows = body as ConformerRow[];
         setConfs(rows);
@@ -686,9 +673,10 @@ export default function App({ initialMode = "molecules" as Mode }) {
           ).sort((a, b) => a - b);
           setWellRankOptions(ranks);
         }
-      } catch (e: any) {
-        if (e?.name !== "AbortError") {
-          setError(e?.message ?? String(e));
+      } catch (e: unknown) {
+        if ((e as { name?: string })?.name !== "AbortError") {
+          const message = e instanceof Error ? e.message : String(e);
+          setError(message);
           setConfs([]);
         }
       } finally {
@@ -701,8 +689,8 @@ export default function App({ initialMode = "molecules" as Mode }) {
   }, [selectedId, repOnly, nonTSOnly, wellRank]);
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="sticky top-0 z-40 backdrop-blur bg-white/70 border-b">
+    <div className="min-h-screen bg-background text-foreground">
+      <header className="sticky top-0 z-40 backdrop-blur bg-card/80 border-b border-border">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Layers className="w-6 h-6" />
@@ -711,7 +699,8 @@ export default function App({ initialMode = "molecules" as Mode }) {
               alpha
             </Badge>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <ThemeModeToggle condensed />
             <Button variant="outline" size="sm" asChild>
               <a href={DOWNLOAD_URL}>Download dataset</a>
             </Button>
@@ -1019,11 +1008,20 @@ export default function App({ initialMode = "molecules" as Mode }) {
             <Button
               onClick={doSearch}
               disabled={searchLoading}
-              className="w-full gap-2 rounded-xl bg-black hover:bg-neutral-900"
+              className="w-full gap-2 rounded-xl bg-black hover:bg-neutral-900 text-white"
             >
               <SearchIcon className="h-5 w-5" />
               {searchLoading ? "Searching…" : "Query"}
             </Button>
+
+            {error && (
+              <div
+                role="alert"
+                className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"
+              >
+                {error}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -1158,7 +1156,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                         return (
                           <tr
                             key={rxn.reaction_id}
-                            className="hover:bg-slate-50 cursor-pointer"
+                            className="hover:bg-secondary/30 dark:hover:bg-secondary/15 cursor-pointer transition-colors"
                             onClick={() => openRxnSummary(rxn)}
                           >
                             <td className="px-3 py-2">{rxn.reaction_id}</td>
@@ -1182,7 +1180,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                             <td className="px-3 py-2">{rxn.ksets_count}</td>
                             <td className="px-3 py-2">
                               <Button
-                                className="bg-black hover:bg-neutral-900"
+                                className="bg-black text-white hover:bg-neutral-900"
                                 onClick={(e) => {
                                   e.stopPropagation(); // keep row click from opening the drawer
                                   navigate(`/reactions/${rxn.reaction_id}`);
@@ -1231,7 +1229,10 @@ export default function App({ initialMode = "molecules" as Mode }) {
                     </thead>
                     <tbody className="divide-y divide-slate-200">
                       {species.map((sp) => (
-                        <tr key={sp.species_id} className="hover:bg-slate-50">
+                        <tr
+                          key={sp.species_id}
+                          className="hover:bg-secondary/30 dark:hover:bg-secondary/15 cursor-pointer"
+                        >
                           <td className="px-3 py-2">{sp.species_id}</td>
                           <td className="px-3 py-2">
                             {(explicitSmiles
@@ -1268,6 +1269,12 @@ export default function App({ initialMode = "molecules" as Mode }) {
 
                 {/* CONFORMERS */}
                 <h2 className="text-2xl font-semibold">Conformers</h2>
+
+                {confLoading && (
+                  <p className="text-sm text-zinc-500">
+                    Loading conformers…
+                  </p>
+                )}
 
                 <div className="mb-2 flex flex-wrap items-center gap-6 text-sm">
                   <label className="inline-flex items-center gap-2">
@@ -1436,7 +1443,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                             onClick={() =>
                               navigate(`/conformers/${c.conformer_id}`)
                             }
-                            className="hover:bg-slate-50 cursor-pointer"
+                            className="hover:bg-secondary/30 dark:hover:bg-secondary/15 cursor-pointer"
                             tabIndex={0}
                             onKeyDown={(e) => {
                               if (e.key === "Enter" || e.key === " ")
@@ -1452,7 +1459,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                             </td>
                             {selectedEnergyKeys.map((k) => (
                               <td key={k} className="px-3 py-2">
-                                {fmt((c as any)[k])}
+                                {fmt(c[k as keyof ConformerRow])}
                               </td>
                             ))}
                             <td className="px-3 py-2">{c.is_ts ? "TS" : ""}</td>
@@ -1541,7 +1548,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                         key={`${p.role}-${p.conformer_id ?? p.species_id}`}
                         className="flex items-center justify-between gap-3 text-sm"
                       >
-                        <span className="px-2 py-0.5 rounded bg-zinc-100">
+                        <span className="px-2 py-0.5 rounded bg-secondary text-secondary-foreground">
                           {p.role}
                         </span>
                         <span className="font-mono truncate">
@@ -1561,7 +1568,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
 
                 <div className="flex items-center gap-2">
                   <Button
-                    className="bg-black hover:bg-neutral-900"
+                    className="bg-black text-white hover:bg-neutral-900"
                     onClick={() =>
                       activeRxn &&
                       navigate(`/reactions/${activeRxn.reaction_id}`)

@@ -1,24 +1,74 @@
 import React from "react";
 
+type SpinAxis = "x" | "y" | "z";
+type ViewerAtom = {
+  elem?: string;
+  element?: string;
+  serial?: number;
+  x: number;
+  y: number;
+  z: number;
+};
+type ViewerAtomWithIndex = ViewerAtom & { _idx1?: number };
+type LabelOptions = {
+  position: { x: number; y: number; z: number };
+  fontSize?: number;
+  fontColor?: string;
+  backgroundColor?: string;
+  showBackground?: boolean;
+  inFront?: boolean;
+  alignment?: "center" | "left" | "right";
+  screenOffset?: { x: number; y: number };
+};
+type GLModel = {
+  setBonding?(flag: boolean): void;
+  assignBonds?(): void;
+  setStyle(selector: Record<string, unknown>, style: Record<string, unknown>): void;
+  selectedAtoms(selector: Record<string, unknown>): ViewerAtomWithIndex[];
+};
+type GLViewer = {
+  setBackgroundColor(color: string): void;
+  addModel(xyz: string, format: string): GLModel;
+  removeAllModels(): void;
+  zoomTo(): void;
+  render(): void;
+  resize(): void;
+  spin(axis: SpinAxis | false, speed?: number): void;
+  removeAllLabels?(): void;
+  addLabel(text: string, options: LabelOptions): void;
+  clear?(): void;
+};
+type ThreeDMol = {
+  GLViewer: new (
+    element: Element,
+    options?: { backgroundColor?: string; antialias?: boolean },
+  ) => GLViewer;
+  JmolColors?: Record<string, number>;
+};
+
 declare global {
   interface Window {
-    $3Dmol?: any;
+    $3Dmol?: ThreeDMol;
   }
 }
 
-function load3Dmol(): Promise<any> {
+function load3Dmol(): Promise<ThreeDMol | null> {
   if (window.$3Dmol) return Promise.resolve(window.$3Dmol);
   return new Promise((resolve, reject) => {
     const s = document.createElement("script");
     s.src = "https://3dmol.csb.pitt.edu/build/3Dmol-min.js";
     s.async = true;
-    s.onload = () => resolve(window.$3Dmol);
+    s.onload = () => resolve(window.$3Dmol ?? null);
     s.onerror = () => reject(new Error("3Dmol load failed"));
     document.head.appendChild(s);
   });
 }
 
 type LabelMode = "none" | "elem" | "index" | "elem+index";
+
+const logViewerError = (context: string, error: unknown) => {
+  console.debug(`[3Dmol] ${context}`, error);
+};
 
 function ensureXYZHeader(xyz: string) {
   const lines = xyz.trim().split(/\r?\n/);
@@ -42,11 +92,11 @@ const CHEMCRAFT_COLORS: Record<string, number> = {
   B: 0xff9e70, // warm neon peach
 };
 
-function chemcraftColor(atom: any): number {
+function chemcraftColor(atom: ViewerAtom): number {
   const sym = (atom.elem || atom.element || "").toString();
   if (CHEMCRAFT_COLORS[sym]) return CHEMCRAFT_COLORS[sym];
   // fallback: Jmol default if unknown element
-  return (window.$3Dmol?.JmolColors?.[sym] as number) ?? 0xcccccc;
+  return window.$3Dmol?.JmolColors?.[sym] ?? 0xcccccc;
 }
 
 type Props = {
@@ -73,8 +123,8 @@ const ConformerViewer3D: React.FC<Props> = ({
   labelHydrogens = true,
 }) => {
   const containerRef = React.useRef<HTMLDivElement>(null);
-  const viewerRef = React.useRef<any>(null);
-  const modelRef = React.useRef<any>(null);
+  const viewerRef = React.useRef<GLViewer | null>(null);
+  const modelRef = React.useRef<GLModel | null>(null);
   const [ready, setReady] = React.useState(false);
 
   // Create viewer once (first time tab becomes active + element is mounted)
@@ -108,7 +158,9 @@ const ConformerViewer3D: React.FC<Props> = ({
         try {
           v.resize();
           v.render();
-        } catch {}
+        } catch (error) {
+          logViewerError("nudge render", error);
+        }
       };
       requestAnimationFrame(nudge);
       setTimeout(nudge, 0);
@@ -132,8 +184,8 @@ const ConformerViewer3D: React.FC<Props> = ({
       m.assignBonds?.();
       v.zoomTo();
       v.render();
-    } catch (e) {
-      console.error("3Dmol set model failed:", e);
+    } catch (error) {
+      logViewerError("set model", error);
     }
   }, [xyz, ready]);
 
@@ -187,45 +239,39 @@ const ConformerViewer3D: React.FC<Props> = ({
     const gvStickColor = useGV ? "#7a7a7a" : undefined;
 
     if (style === "line") {
-      m.setStyle(
-        {},
-        {
-          line: {
-            linewidth: 3.0,
-            colorfunc, // Chemcraft lines colored
-            colorscheme: useJmol ? "Jmol" : undefined,
-          },
+      const lineStyle: Record<string, unknown> = {
+        line: {
+          linewidth: 3.0,
+          colorfunc,
+          colorscheme: useJmol ? "Jmol" : undefined,
         },
-      );
+      };
+      m.setStyle({}, lineStyle);
     } else if (style === "spacefill") {
-      m.setStyle(
-        {},
-        {
-          sphere: {
-            scale: sphereScale,
-            colorfunc,
-            colorscheme: useJmol ? "Jmol" : undefined,
-          },
+      const sphereStyle: Record<string, unknown> = {
+        sphere: {
+          scale: sphereScale,
+          colorfunc,
+          colorscheme: useJmol ? "Jmol" : undefined,
         },
-      );
+      };
+      m.setStyle({}, sphereStyle);
     } else {
       // ball & stick
-      m.setStyle(
-        {},
-        {
-          stick: {
-            radius: stickRadius,
-            color: gvStickColor, // GaussView grey bonds
-            colorfunc: useChemcraft ? chemcraftColor : undefined,
-            colorscheme: useJmol ? "Jmol" : undefined,
-          },
-          sphere: {
-            scale: sphereScale,
-            colorfunc,
-            colorscheme: useJmol ? "Jmol" : undefined,
-          },
+      const styleSpec: Record<string, unknown> = {
+        stick: {
+          radius: stickRadius,
+          color: gvStickColor,
+          colorfunc,
+          colorscheme: useJmol ? "Jmol" : undefined,
         },
-      );
+        sphere: {
+          scale: sphereScale,
+          colorfunc,
+          colorscheme: useJmol ? "Jmol" : undefined,
+        },
+      };
+      m.setStyle({}, styleSpec);
     }
 
     v.render();
@@ -243,7 +289,9 @@ const ConformerViewer3D: React.FC<Props> = ({
       if (spin) v.spin("y", 1.2);
       else v.spin(false);
       v.render();
-    } catch {}
+    } catch (error) {
+      logViewerError("spin", error);
+    }
   }, [spin, ready]);
 
   // show labels
@@ -260,23 +308,24 @@ const ConformerViewer3D: React.FC<Props> = ({
     }
 
     // atoms available from model
-    const atoms = m.selectedAtoms({}); // all atoms
+    const atoms = m.selectedAtoms({}) ?? [];
     // Ensure we have a stable 1-based index (serial sometimes starts at 0)
-    atoms.forEach((a: any, i: number) => {
-      a._idx1 = (a.serial ?? i) + 1;
+    atoms.forEach((atom, i) => {
+      atom._idx1 = (atom.serial ?? i) + 1;
     });
 
-    for (const a of atoms) {
-      if (!labelHydrogens && a.elem === "H") continue;
+    for (const atom of atoms) {
+      const element = atom.elem ?? atom.element ?? "";
+      if (!labelHydrogens && element === "H") continue;
 
       let text = "";
-      if (labelMode === "elem") text = a.elem;
-      else if (labelMode === "index") text = String(a._idx1);
-      else text = `${a.elem}${a._idx1}`; // elem+index
+      if (labelMode === "elem") text = element;
+      else if (labelMode === "index") text = String(atom._idx1 ?? "");
+      else text = `${element}${atom._idx1 ?? ""}`;
 
       // place the label at atom position
       v.addLabel(text, {
-        position: { x: a.x, y: a.y, z: a.z },
+        position: { x: atom.x, y: atom.y, z: atom.z },
         fontSize: 12,
         fontColor: "white",
         backgroundColor: "rgba(0,0,0,0.55)",
@@ -284,7 +333,6 @@ const ConformerViewer3D: React.FC<Props> = ({
         inFront: true, // draw in front of geometry
         alignment: "center",
         // A tiny screen offset helps readability
-        // @ts-ignore
         screenOffset: { x: 0, y: -8 },
       });
     }
@@ -301,7 +349,9 @@ const ConformerViewer3D: React.FC<Props> = ({
       try {
         viewerRef.current.resize();
         viewerRef.current.render();
-      } catch {}
+      } catch (error) {
+        logViewerError("resize", error);
+      }
     }
   }, [active]);
 
@@ -314,7 +364,9 @@ const ConformerViewer3D: React.FC<Props> = ({
       try {
         v.resize();
         v.render();
-      } catch {}
+      } catch (error) {
+        logViewerError("observer resize", error);
+      }
     });
     ro.observe(containerRef.current);
     return () => ro.disconnect();
@@ -326,7 +378,9 @@ const ConformerViewer3D: React.FC<Props> = ({
       if (viewerRef.current) {
         try {
           viewerRef.current.clear?.();
-        } catch {}
+        } catch (error) {
+          logViewerError("cleanup", error);
+        }
         viewerRef.current = null;
       }
     },

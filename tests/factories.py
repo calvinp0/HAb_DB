@@ -12,7 +12,7 @@ def make_species(session, *, smiles=None, inchikey=None, charge=0, spin=1):
 
 
 def add_name(
-    session, species, name, kind="synonym", lang="en", is_primary=False, source="manual"
+    session, species, name, kind="synonym", lang="en", is_primary=False, source="user"
 ):
     sn = SpeciesName(
         species_id=species.species_id,
