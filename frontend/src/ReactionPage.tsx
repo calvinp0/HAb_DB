@@ -37,6 +37,13 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ExpandableKineticsChart } from "./KineticsPanel";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ThemeModeToggle } from "@/components/ThemeModeToggle";
 
 const RAW_API = import.meta.env.VITE_API_BASE ?? "/api";
@@ -1024,13 +1031,20 @@ function KineticsPanel({
 }) {
   const [arrheniusX, setArrheniusX] = useState(true);
 
+  const [secondOrderUnit, setSecondOrderUnit] = useState<"m3" | "cm3">("m3");
   const unitLabel = useMemo(() => {
     if (order === 1) return "s⁻¹";
-    if (order === 2) return "m³/(mol·s)";
+    if (order === 2)
+      return secondOrderUnit === "cm3" ? "cm³/(mol·s)" : "m³/(mol·s)";
     return "m⁶/(mol²·s)";
-  }, [order]);
+  }, [order, secondOrderUnit]);
 
-  const scaleK = order === 2 /* and A is in cm³ */ ? 1e-6 : 1;
+  const scaleK = useMemo(() => {
+    if (order === 2) {
+      return secondOrderUnit === "cm3" ? 1 : 1e-6;
+    }
+    return 1;
+  }, [order, secondOrderUnit]);
 
   // Tmin/Tmax
   const [Tmin, Tmax] = useMemo(() => {
@@ -1110,7 +1124,7 @@ function KineticsPanel({
       </CardHeader>
 
       <CardContent>
-        <div className="flex items-center gap-4 pb-2">
+        <div className="flex flex-wrap items-center gap-4 pb-2">
           <label className="inline-flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -1120,6 +1134,25 @@ function KineticsPanel({
             />
             <span>Arrhenius x-axis (1000 / T)</span>
           </label>
+          {order === 2 && (
+            <div className="flex items-center gap-2 text-sm">
+              <span>Units</span>
+              <Select
+                value={secondOrderUnit}
+                onValueChange={(value) =>
+                  setSecondOrderUnit((value as "m3" | "cm3") ?? "m3")
+                }
+              >
+                <SelectTrigger className="h-8 w-32">
+                  <SelectValue placeholder="Units" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="m3">m³/(mol·s)</SelectItem>
+                  <SelectItem value="cm3">cm³/(mol·s)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
         </div>
 
         <div className="grid lg:grid-cols-2 gap-6">
