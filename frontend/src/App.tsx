@@ -45,6 +45,14 @@ const API_BASE = new URL(
   window.location.origin,
 );
 const DOWNLOAD_URL = new URL("downloads/reactions.zip", API_BASE).toString();
+const formatFamilyLabel = (family?: string | null) => {
+  if (!family) return "—";
+  const normalized = family.toLowerCase().replace(/\s+/g, "");
+  if (normalized === "h_abstraction" || normalized === "habstraction") {
+    return "Hydrogen Abstraction";
+  }
+  return family;
+};
 
 // ----- Types that mirror your FastAPI response models -----
 export interface SpeciesOut {
@@ -1153,10 +1161,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                           )
                           .join(" + ");
 
-                        const familyLabel =
-                          rxn.family === "H_Abstraction"
-                            ? "Hydrogen Abstraction"
-                            : rxn.family;
+                        const familyLabel = formatFamilyLabel(rxn.family);
                         return (
                           <tr
                             key={rxn.reaction_id}
@@ -1495,7 +1500,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
             <SheetHeader>
               <SheetTitle>
                 {activeRxn
-                  ? `Reaction ${activeRxn.reaction_id} • ${activeRxn.family}`
+                  ? `Reaction ${activeRxn.reaction_id} • ${formatFamilyLabel(activeRxn.family)}`
                   : "Reaction"}
               </SheetTitle>
               <SheetDescription>

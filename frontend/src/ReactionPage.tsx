@@ -41,6 +41,14 @@ import { ThemeModeToggle } from "@/components/ThemeModeToggle";
 
 const RAW_API = import.meta.env.VITE_API_BASE ?? "/api";
 const BASE_URL = import.meta.env.BASE_URL || "/";
+const formatFamilyLabel = (family?: string | null) => {
+  if (!family) return "—";
+  const normalized = family.toLowerCase().replace(/\s+/g, "");
+  if (normalized === "h_abstraction" || normalized === "habstraction") {
+    return "Hydrogen Abstraction";
+  }
+  return family;
+};
 
 function api(path: string) {
   // ensures exactly one slash between base and path
@@ -1241,7 +1249,7 @@ export default function ReactionPage() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="secondary">{rxn.family}</Badge>
+          <Badge variant="secondary">{formatFamilyLabel(rxn.family)}</Badge>
           <ThemeModeToggle condensed />
           <BackLink />
         </div>
@@ -1263,7 +1271,7 @@ export default function ReactionPage() {
             />
             <span>Explicit SMILES</span>
           </label>
-          <Badge variant="secondary">{rxn.family}</Badge>
+          <Badge variant="secondary">{formatFamilyLabel(rxn.family)}</Badge>
         </div>
       </div>
 
