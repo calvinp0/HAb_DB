@@ -1153,6 +1153,10 @@ export default function App({ initialMode = "molecules" as Mode }) {
                           )
                           .join(" + ");
 
+                        const familyLabel =
+                          rxn.family === "H_Abstraction"
+                            ? "Hydrogen Abstraction"
+                            : rxn.family;
                         return (
                           <tr
                             key={rxn.reaction_id}
@@ -1160,7 +1164,7 @@ export default function App({ initialMode = "molecules" as Mode }) {
                             onClick={() => openRxnSummary(rxn)}
                           >
                             <td className="px-3 py-2">{rxn.reaction_id}</td>
-                            <td className="px-3 py-2">{rxn.family}</td>
+                            <td className="px-3 py-2">{familyLabel}</td>
                             <td className="px-3 py-2">
                               <div className="flex items-center gap-2 font-mono text-base md:w-full">
                                 <span className="truncate" title={reactants}>
