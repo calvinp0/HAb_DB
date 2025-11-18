@@ -37,6 +37,16 @@ type GLViewer = {
   removeAllLabels?(): void;
   addLabel(text: string, options: LabelOptions): void;
   clear?(): void;
+  pickAtom?(
+    opts: { x: number; y: number },
+    callback?: (atom: ViewerAtomWithIndex | null) => void,
+  ): ViewerAtomWithIndex | null;
+  setClickable?(
+    selection: Record<string, unknown>,
+    enable: boolean,
+    callback?: (atom: ViewerAtomWithIndex | null) => void,
+    context?: unknown,
+  ): void;
 };
 type ThreeDMol = {
   GLViewer: new (
@@ -109,6 +119,14 @@ type Props = {
   theme?: "jmol" | "gaussview" | "chemcraft";
   labelMode?: LabelMode;
   labelHydrogens?: boolean;
+  enableMeasurements?: boolean;
+  onPickAtom?: (atom: {
+    index: number;
+    element: string;
+    x: number;
+    y: number;
+    z: number;
+  }) => void;
 };
 
 const ConformerViewer3D: React.FC<Props> = ({
@@ -121,6 +139,8 @@ const ConformerViewer3D: React.FC<Props> = ({
   theme = "jmol",
   labelMode = "none",
   labelHydrogens = true,
+  enableMeasurements = false,
+  onPickAtom,
 }) => {
   const containerRef = React.useRef<HTMLDivElement>(null);
   const viewerRef = React.useRef<GLViewer | null>(null);
@@ -170,39 +190,6 @@ const ConformerViewer3D: React.FC<Props> = ({
       cancelled = true;
     };
   }, [active, background, theme]);
-
-  // (re)load model
-  React.useEffect(() => {
-    const v = viewerRef.current;
-    if (!v || !xyz) return;
-    try {
-      v.removeAllModels();
-      const m = v.addModel(ensureXYZHeader(xyz), "xyz");
-      modelRef.current = m;
-      // ensure bonds exist so "line" shows
-      m.setBonding?.(true);
-      m.assignBonds?.();
-      v.zoomTo();
-      v.render();
-    } catch (error) {
-      logViewerError("set model", error);
-    }
-  }, [xyz, ready]);
-
-  React.useEffect(() => {
-    const canvas = containerRef.current?.querySelector(
-      "canvas",
-    ) as HTMLCanvasElement | null;
-    if (!canvas) return;
-    if (theme === "chemcraft") {
-      canvas.style.filter = "saturate(155%) contrast(105%) brightness(100%)";
-      canvas.style.background = "#000"; // insurance if theme switching
-    } else if (theme === "gaussview") {
-      canvas.style.filter = "saturate(120%)";
-    } else {
-      canvas.style.filter = ""; // normal
-    }
-  }, [theme, ready]);
 
   // apply style / colors
   const applyStyle = React.useCallback(() => {
@@ -276,6 +263,39 @@ const ConformerViewer3D: React.FC<Props> = ({
 
     v.render();
   }, [style, theme]);
+
+  // (re)load model
+  React.useEffect(() => {
+    const v = viewerRef.current;
+    if (!v || !xyz) return;
+    try {
+      v.removeAllModels();
+      const m = v.addModel(ensureXYZHeader(xyz), "xyz");
+      modelRef.current = m;
+      // ensure bonds exist so "line" shows
+      m.setBonding?.(true);
+      m.assignBonds?.();
+      v.zoomTo();
+      applyStyle();
+    } catch (error) {
+      logViewerError("set model", error);
+    }
+  }, [xyz, ready, applyStyle]);
+
+  React.useEffect(() => {
+    const canvas = containerRef.current?.querySelector(
+      "canvas",
+    ) as HTMLCanvasElement | null;
+    if (!canvas) return;
+    if (theme === "chemcraft") {
+      canvas.style.filter = "saturate(155%) contrast(105%) brightness(100%)";
+      canvas.style.background = "#000"; // insurance if theme switching
+    } else if (theme === "gaussview") {
+      canvas.style.filter = "saturate(120%)";
+    } else {
+      canvas.style.filter = ""; // normal
+    }
+  }, [theme, ready]);
 
   React.useEffect(() => {
     applyStyle();
@@ -371,6 +391,66 @@ const ConformerViewer3D: React.FC<Props> = ({
     ro.observe(containerRef.current);
     return () => ro.disconnect();
   }, []);
+
+  // measurement picking
+  React.useEffect(() => {
+    if (!enableMeasurements || !onPickAtom) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const handlePointerUp = (event: PointerEvent) => {
+      const v = viewerRef.current;
+      if (!v || !enableMeasurements || !onPickAtom) return;
+      const pickOpts = { x: event.clientX, y: event.clientY };
+      const handleAtom = (atom: ViewerAtomWithIndex | null) => {
+        if (!atom) return;
+        onPickAtom({
+          index: (atom.serial ?? 0) + 1,
+          element: atom.elem ?? atom.element ?? "",
+          x: atom.x,
+          y: atom.y,
+          z: atom.z,
+        });
+      };
+      try {
+        const result = v.pickAtom?.(pickOpts, handleAtom) ?? null;
+        if (result) handleAtom(result);
+      } catch (error) {
+        logViewerError("pick atom", error);
+      }
+    };
+    el.addEventListener("pointerup", handlePointerUp, true);
+    return () => {
+      el.removeEventListener("pointerup", handlePointerUp, true);
+    };
+  }, [enableMeasurements, onPickAtom, ready, xyz, style, theme]);
+
+  React.useEffect(() => {
+    if (!enableMeasurements || !onPickAtom) return;
+    const v = viewerRef.current;
+    if (!v || typeof v.setClickable !== "function") return;
+    const handleAtom = (atom: ViewerAtomWithIndex | null) => {
+      if (!atom) return;
+      onPickAtom({
+        index: (atom.serial ?? 0) + 1,
+        element: atom.elem ?? atom.element ?? "",
+        x: atom.x,
+        y: atom.y,
+        z: atom.z,
+      });
+    };
+    try {
+      v.setClickable({}, true, handleAtom);
+    } catch (error) {
+      logViewerError("enable clickable", error);
+    }
+    return () => {
+      try {
+        v.setClickable?.({}, false);
+      } catch (error) {
+        logViewerError("disable clickable", error);
+      }
+    };
+  }, [enableMeasurements, onPickAtom, ready, xyz]);
 
   // cleanup
   React.useEffect(

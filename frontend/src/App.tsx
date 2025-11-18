@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Sheet,
   SheetContent,
@@ -711,6 +711,9 @@ export default function App({ initialMode = "molecules" as Mode }) {
             <ThemeModeToggle condensed />
             <Button variant="outline" size="sm" asChild>
               <a href={DOWNLOAD_URL}>Download dataset</a>
+            </Button>
+            <Button variant="secondary" size="sm" asChild>
+              <Link to="/draw">Draw molecule</Link>
             </Button>
           </div>
         </div>
